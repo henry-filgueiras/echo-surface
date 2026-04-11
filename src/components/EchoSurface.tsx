@@ -2833,6 +2833,12 @@ export function EchoSurface({
     setIsMuted(soundRef.current.muted);
   };
 
+  const stopSurfaceGesture = (event: {
+    stopPropagation: () => void;
+  }) => {
+    event.stopPropagation();
+  };
+
   return (
     <section className="surface-panel">
       <div className={`surface-frame${captureMode ? " surface-frame--capture" : ""}`}>
@@ -2880,7 +2886,14 @@ export function EchoSurface({
           </div>
 
           {!captureMode ? (
-            <div className="surface-controls">
+            <div
+              className="surface-controls"
+              onClick={stopSurfaceGesture}
+              onPointerCancel={stopSurfaceGesture}
+              onPointerDown={stopSurfaceGesture}
+              onPointerMove={stopSurfaceGesture}
+              onPointerUp={stopSurfaceGesture}
+            >
               <button
                 className="surface-tool"
                 type="button"
