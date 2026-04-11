@@ -4,4 +4,8 @@ set -euo pipefail
 
 cd "${BUILD_WORKSPACE_DIRECTORY:-$(pwd)}"
 
-exec docker compose up --build -d "$@"
+docker compose up --build -d "$@"
+
+echo
+echo "Echo Surface is available at:"
+echo "  http://localhost:8080"
