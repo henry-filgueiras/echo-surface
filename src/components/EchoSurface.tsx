@@ -42,6 +42,10 @@ type EchoRecord = {
   drift: number;
   wobble: number;
   lineWidth: number;
+  trailDecayMs: number;
+  memoryLifeMs: number;
+  replayIntervalMs: number;
+  synthetic: boolean;
   lastEchoPulseAt: number;
   lastBoostAt: number;
 };
@@ -82,6 +86,17 @@ type Spark = {
   strength: number;
 };
 
+type InterferenceEvent = {
+  id: number;
+  bornAt: number;
+  ttl: number;
+  point: NormalizedPoint;
+  secondaryPoint?: NormalizedPoint;
+  hue: number;
+  strength: number;
+  symmetry: number;
+};
+
 type MemoryChip = {
   id: number;
   hue: number;
@@ -89,6 +104,7 @@ type MemoryChip = {
 };
 
 export type SurfacePreset = "seed" | "trace" | "hold";
+type SymmetryMode = "auto" | 2 | 4 | 6;
 
 type SurfaceSize = {
   width: number;
@@ -110,6 +126,7 @@ type SimulationState = {
   echoes: EchoRecord[];
   pulses: Pulse[];
   sparks: Spark[];
+  interferenceEvents: InterferenceEvent[];
   interactions: number;
 };
 
@@ -118,10 +135,16 @@ type EchoSurfaceProps = {
   captureMode?: boolean;
 };
 
-const MAX_ECHOES = 20;
+const MAX_ECHOES = 12;
 const TAU = Math.PI * 2;
 const SURFACE_PRESETS: SurfacePreset[] = ["seed", "trace", "hold"];
 type ToneMode = "tap" | "hold" | "ghost" | "collision";
+const SYMMETRY_MODE_SEQUENCE: SymmetryMode[] = ["auto", 2, 4, 6];
+const LOOP_ENABLED = true;
+const ECHO_TRAIL_DECAY_MS = 2400;
+const ECHO_MEMORY_LIFE_MS = 14000;
+const IDLE_DEMO_AFTER_MS = 11000;
+const DEMO_INTERVAL_MS = 2800;
 
 export const isSurfacePreset = (value: string | null): value is SurfacePreset =>
   value !== null && SURFACE_PRESETS.includes(value as SurfacePreset);
@@ -136,6 +159,14 @@ const mix = (a: number, b: number, amount: number) => lerp(a, b, amount);
 
 const distance = (a: NormalizedPoint, b: NormalizedPoint) =>
   Math.hypot(a.x - b.x, a.y - b.y);
+
+const easeOutCubic = (value: number) => 1 - (1 - value) ** 3;
+
+const easeInOutSine = (value: number) =>
+  -(Math.cos(Math.PI * value) - 1) / 2;
+
+const smoothPulse = (value: number) =>
+  Math.sin(clamp(value, 0, 1) * Math.PI);
 
 const CLUB_SCALE = [0, 3, 5, 7, 10];
 
@@ -175,6 +206,15 @@ const pickClubFrequency = (hue: number, mode: ToneMode) => {
 const normalizedToPixels = (point: NormalizedPoint, size: SurfaceSize) => ({
   x: point.x * size.width,
   y: point.y * size.height,
+});
+
+const pixelsToNormalized = (
+  point: { x: number; y: number },
+  size: SurfaceSize,
+): NormalizedPoint => ({
+  x: clamp(point.x / size.width, 0, 1),
+  y: clamp(point.y / size.height, 0, 1),
+  t: 0,
 });
 
 const rotatePoint = (point: NormalizedPoint, angle: number): NormalizedPoint => {
@@ -276,6 +316,108 @@ const point = (x: number, y: number, t: number): NormalizedPoint => ({
   t,
 });
 
+const circleIntersections = (
+  centerA: { x: number; y: number },
+  radiusA: number,
+  centerB: { x: number; y: number },
+  radiusB: number,
+) => {
+  const dx = centerB.x - centerA.x;
+  const dy = centerB.y - centerA.y;
+  const distanceBetweenCenters = Math.hypot(dx, dy);
+
+  if (
+    distanceBetweenCenters === 0 ||
+    distanceBetweenCenters > radiusA + radiusB ||
+    distanceBetweenCenters < Math.abs(radiusA - radiusB)
+  ) {
+    return [] as { x: number; y: number }[];
+  }
+
+  const a =
+    (radiusA * radiusA -
+      radiusB * radiusB +
+      distanceBetweenCenters * distanceBetweenCenters) /
+    (2 * distanceBetweenCenters);
+  const hSquared = radiusA * radiusA - a * a;
+
+  if (hSquared < 0) {
+    return [];
+  }
+
+  const h = Math.sqrt(hSquared);
+  const midpoint = {
+    x: centerA.x + (a * dx) / distanceBetweenCenters,
+    y: centerA.y + (a * dy) / distanceBetweenCenters,
+  };
+  const offset = {
+    x: (-dy * h) / distanceBetweenCenters,
+    y: (dx * h) / distanceBetweenCenters,
+  };
+
+  return [
+    {
+      x: midpoint.x + offset.x,
+      y: midpoint.y + offset.y,
+    },
+    {
+      x: midpoint.x - offset.x,
+      y: midpoint.y - offset.y,
+    },
+  ];
+};
+
+const getPulseFront = (
+  pulse: Pulse,
+  now: number,
+  size: SurfaceSize,
+) => {
+  const age = now - pulse.bornAt;
+  const progress = clamp(age / pulse.ttl, 0, 1);
+  const eased = easeOutCubic(progress);
+  const minDimension = Math.min(size.width, size.height);
+  const radius = mix(
+    14,
+    minDimension * (0.08 + pulse.strength * 0.26),
+    eased,
+  );
+  const thickness = mix(18, 3.5, progress) * (0.7 + pulse.strength * 0.22);
+  const alpha =
+    (1 - progress) ** 1.35 *
+    (pulse.source === "collision" ? 0.42 : 0.24 + pulse.strength * 0.24);
+
+  return {
+    progress,
+    radius,
+    thickness,
+    alpha,
+  };
+};
+
+const DEMO_LIBRARY = [
+  [
+    point(0.22, 0.34, 0),
+    point(0.31, 0.29, 180),
+    point(0.41, 0.33, 360),
+    point(0.49, 0.45, 620),
+    point(0.44, 0.57, 860),
+  ],
+  [
+    point(0.66, 0.24, 0),
+    point(0.72, 0.3, 140),
+    point(0.77, 0.43, 320),
+    point(0.69, 0.56, 540),
+    point(0.58, 0.6, 760),
+  ],
+  [
+    point(0.36, 0.73, 0),
+    point(0.47, 0.62, 200),
+    point(0.58, 0.57, 360),
+    point(0.63, 0.68, 560),
+    point(0.53, 0.8, 760),
+  ],
+];
+
 const makeSurfacePoint = (
   event: ReactPointerEvent<HTMLDivElement>,
   element: HTMLDivElement,
@@ -335,46 +477,148 @@ const drawPulse = (
   pulse: Pulse,
   now: number,
 ) => {
-  const age = now - pulse.bornAt;
-  const progress = clamp(age / pulse.ttl, 0, 1);
-  const baseRadius = mix(18, 170 * pulse.strength, progress);
+  const { progress, radius, thickness, alpha } = getPulseFront(pulse, now, size);
   const copyCount = Math.max(pulse.symmetry, 1);
-  const alpha = (1 - progress) * (0.28 + pulse.strength * 0.24);
+
+  context.save();
+  context.globalCompositeOperation = "lighter";
 
   for (let copyIndex = 0; copyIndex < copyCount; copyIndex += 1) {
     const angle = (copyIndex / copyCount) * TAU;
     const rotated = rotatePoint(pulse.point, angle);
     const pixel = normalizedToPixels(rotated, size);
+    const glowRadius = radius + thickness * 1.6;
     const gradient = context.createRadialGradient(
       pixel.x,
       pixel.y,
-      baseRadius * 0.1,
+      Math.max(0, radius - thickness * 0.8),
       pixel.x,
       pixel.y,
-      baseRadius,
+      glowRadius,
     );
 
     gradient.addColorStop(
       0,
-      `hsla(${pulse.hue}, 88%, 72%, ${alpha * 0.52})`,
+      `hsla(${pulse.hue}, 90%, 74%, 0)`,
     );
     gradient.addColorStop(
-      0.55,
-      `hsla(${pulse.hue}, 82%, 60%, ${alpha * 0.16})`,
+      0.68,
+      `hsla(${pulse.hue}, 88%, 68%, ${alpha * 0.28})`,
     );
     gradient.addColorStop(1, `hsla(${pulse.hue}, 82%, 58%, 0)`);
 
     context.fillStyle = gradient;
     context.beginPath();
-    context.arc(pixel.x, pixel.y, baseRadius, 0, TAU);
+    context.arc(pixel.x, pixel.y, glowRadius, 0, TAU);
     context.fill();
 
-    context.lineWidth = mix(1.2, 4.2, pulse.strength);
-    context.strokeStyle = `hsla(${pulse.hue}, 90%, 80%, ${alpha})`;
+    context.shadowBlur = 22 + pulse.strength * 18;
+    context.shadowColor = `hsla(${pulse.hue}, 92%, 74%, ${alpha})`;
+    context.lineWidth = thickness;
+    context.strokeStyle = `hsla(${pulse.hue}, 92%, 82%, ${alpha * 1.1})`;
     context.beginPath();
-    context.arc(pixel.x, pixel.y, baseRadius * 0.72, 0, TAU);
+    context.arc(pixel.x, pixel.y, radius, 0, TAU);
     context.stroke();
+
+    context.shadowBlur = 0;
+    context.fillStyle = `hsla(${pulse.hue}, 94%, 82%, ${
+      (1 - progress) * 0.15
+    })`;
+    context.beginPath();
+    context.arc(pixel.x, pixel.y, 5 + pulse.strength * 3, 0, TAU);
+    context.fill();
   }
+
+  context.restore();
+};
+
+const drawInterferenceEvent = (
+  context: CanvasRenderingContext2D,
+  size: SurfaceSize,
+  event: InterferenceEvent,
+  now: number,
+) => {
+  const age = now - event.bornAt;
+  const progress = clamp(age / event.ttl, 0, 1);
+  const pulse = smoothPulse(1 - progress);
+  const points = event.secondaryPoint
+    ? [event.point, event.secondaryPoint]
+    : [event.point];
+
+  context.save();
+  context.globalCompositeOperation = "lighter";
+
+  const copyCount = Math.max(event.symmetry, 1);
+
+  for (let copyIndex = 0; copyIndex < copyCount; copyIndex += 1) {
+    const angle = (copyIndex / copyCount) * TAU;
+
+    if (event.secondaryPoint) {
+      const primaryPixel = normalizedToPixels(rotatePoint(event.point, angle), size);
+      const secondaryPixel = normalizedToPixels(
+        rotatePoint(event.secondaryPoint, angle),
+        size,
+      );
+      const midpoint = {
+        x: (primaryPixel.x + secondaryPixel.x) * 0.5,
+        y: (primaryPixel.y + secondaryPixel.y) * 0.5 - 18 * pulse,
+      };
+      const alpha = (1 - progress) * (0.18 + event.strength * 0.16);
+
+      context.strokeStyle = `hsla(${event.hue}, 100%, 82%, ${alpha})`;
+      context.lineWidth = 1 + event.strength * 2.1;
+      context.beginPath();
+      context.moveTo(primaryPixel.x, primaryPixel.y);
+      context.quadraticCurveTo(
+        midpoint.x,
+        midpoint.y,
+        secondaryPixel.x,
+        secondaryPixel.y,
+      );
+      context.stroke();
+    }
+
+    points.forEach((point, index) => {
+      const rotated = rotatePoint(point, angle);
+      const pixel = normalizedToPixels(rotated, size);
+      const coreRadius = 16 + event.strength * 28 * pulse;
+      const harmonicRadius = 8 + event.strength * 44 * easeOutCubic(progress);
+      const alpha = (1 - progress) * (0.32 + event.strength * 0.26);
+      const gradient = context.createRadialGradient(
+        pixel.x,
+        pixel.y,
+        0,
+        pixel.x,
+        pixel.y,
+        coreRadius * 1.8,
+      );
+
+      gradient.addColorStop(0, `hsla(${event.hue}, 94%, 84%, ${alpha * 0.9})`);
+      gradient.addColorStop(
+        0.5,
+        `hsla(${event.hue}, 92%, 70%, ${alpha * 0.34})`,
+      );
+      gradient.addColorStop(1, `hsla(${event.hue}, 92%, 62%, 0)`);
+
+      context.fillStyle = gradient;
+      context.beginPath();
+      context.arc(pixel.x, pixel.y, coreRadius * 1.8, 0, TAU);
+      context.fill();
+
+      context.lineWidth = 1.4 + event.strength * 2.8;
+      context.strokeStyle = `hsla(${event.hue}, 100%, 84%, ${alpha})`;
+      context.beginPath();
+      context.arc(pixel.x, pixel.y, harmonicRadius + index * 4, 0, TAU);
+      context.stroke();
+
+      context.fillStyle = `hsla(${event.hue}, 100%, 92%, ${alpha})`;
+      context.beginPath();
+      context.arc(pixel.x, pixel.y, 3 + event.strength * 2.2, 0, TAU);
+      context.fill();
+    });
+  }
+
+  context.restore();
 };
 
 const drawGhostNode = (
@@ -552,6 +796,49 @@ const drawTouchNode = (
   }
 };
 
+const drawMemoryBloom = (
+  context: CanvasRenderingContext2D,
+  size: SurfaceSize,
+  point: NormalizedPoint,
+  hue: number,
+  symmetry: number,
+  intensity: number,
+  drift: number,
+  now: number,
+) => {
+  const copyCount = Math.max(symmetry, 1);
+
+  context.save();
+  context.globalCompositeOperation = "screen";
+
+  for (let copyIndex = 0; copyIndex < copyCount; copyIndex += 1) {
+    const angle = (copyIndex / copyCount) * TAU;
+    const rotated = rotatePoint(point, angle);
+    const pixel = normalizedToPixels(rotated, size);
+    const pulse = 0.78 + Math.sin(now * 0.0011 + drift + copyIndex * 0.6) * 0.14;
+    const radius = 34 + intensity * 48 * pulse;
+    const gradient = context.createRadialGradient(
+      pixel.x,
+      pixel.y,
+      0,
+      pixel.x,
+      pixel.y,
+      radius,
+    );
+
+    gradient.addColorStop(0, `hsla(${hue}, 88%, 76%, ${intensity * 0.18})`);
+    gradient.addColorStop(0.44, `hsla(${hue}, 86%, 68%, ${intensity * 0.08})`);
+    gradient.addColorStop(1, `hsla(${hue}, 82%, 60%, 0)`);
+
+    context.fillStyle = gradient;
+    context.beginPath();
+    context.arc(pixel.x, pixel.y, radius, 0, TAU);
+    context.fill();
+  }
+
+  context.restore();
+};
+
 const chooseHue = (point: NormalizedPoint, interactions: number) => {
   const seed = point.x * 128 + point.y * 54 + interactions * 19;
   return 18 + (seed % 186);
@@ -559,7 +846,34 @@ const chooseHue = (point: NormalizedPoint, interactions: number) => {
 
 const chooseSymmetry = (point: NormalizedPoint) => {
   const distanceFromCenter = Math.hypot(point.x - 0.5, point.y - 0.5);
-  return clamp(3 + Math.round(distanceFromCenter * 5), 3, 6);
+  if (distanceFromCenter < 0.16) {
+    return 1;
+  }
+
+  if (distanceFromCenter < 0.3) {
+    return 2;
+  }
+
+  return point.x < 0.24 || point.x > 0.76 ? 4 : 3;
+};
+
+const formatSymmetryMode = (
+  mode: SymmetryMode,
+  lastResolvedSymmetry: number,
+) => {
+  if (mode === "auto") {
+    return `AUTO x${lastResolvedSymmetry}`;
+  }
+
+  if (mode === 2) {
+    return "DUAL x2";
+  }
+
+  if (mode === 4) {
+    return "QUAD x4";
+  }
+
+  return "KALEID x6";
 };
 
 const createEchoRecord = ({
@@ -577,6 +891,10 @@ const createEchoRecord = ({
   drift,
   wobble,
   lineWidth,
+  trailDecayMs = ECHO_TRAIL_DECAY_MS,
+  memoryLifeMs = ECHO_MEMORY_LIFE_MS,
+  replayIntervalMs = 860,
+  synthetic = false,
 }: {
   id: number;
   bornAt: number;
@@ -592,6 +910,10 @@ const createEchoRecord = ({
   drift: number;
   wobble: number;
   lineWidth: number;
+  trailDecayMs?: number;
+  memoryLifeMs?: number;
+  replayIntervalMs?: number;
+  synthetic?: boolean;
 }): EchoRecord => ({
   id,
   bornAt,
@@ -609,6 +931,10 @@ const createEchoRecord = ({
   drift,
   wobble,
   lineWidth,
+  trailDecayMs,
+  memoryLifeMs,
+  replayIntervalMs,
+  synthetic,
   lastEchoPulseAt: bornAt - 1200,
   lastBoostAt: bornAt - 1200,
 });
@@ -727,6 +1053,7 @@ const createPresetState = (preset: SurfacePreset, now: number) => {
         echoes,
         pulses,
         sparks: [],
+        interferenceEvents: [],
         interactions: echoes.length,
       },
       nextEchoId,
@@ -845,6 +1172,7 @@ const createPresetState = (preset: SurfacePreset, now: number) => {
         echoes,
         pulses,
         sparks,
+        interferenceEvents: [],
         interactions: echoes.length,
       },
       nextEchoId,
@@ -956,6 +1284,7 @@ const createPresetState = (preset: SurfacePreset, now: number) => {
           strength: 0.76,
         },
       ],
+      interferenceEvents: [],
       interactions: echoes.length,
     },
     nextEchoId,
@@ -985,21 +1314,39 @@ export function EchoSurface({
   });
   const pulseIdRef = useRef(0);
   const echoIdRef = useRef(0);
+  const interferenceIdRef = useRef(0);
+  const lastInteractionAtRef = useRef(performance.now());
+  const lastDemoAtRef = useRef(0);
+  const demoCursorRef = useRef(0);
+  const interferenceCooldownRef = useRef(new Map<string, number>());
+  const demoStateRef = useRef(false);
+  const symmetryModeRef = useRef<SymmetryMode>("auto");
   const simulationRef = useRef<SimulationState>({
     activeTouches: new Map(),
     echoes: [],
     pulses: [],
     sparks: [],
+    interferenceEvents: [],
     interactions: 0,
   });
   const [memory, setMemory] = useState<MemoryChip[]>([]);
   const [activeCount, setActiveCount] = useState(0);
   const [isMuted, setIsMuted] = useState(false);
+  const [demoAwake, setDemoAwake] = useState(false);
+  const [symmetryMode, setSymmetryMode] = useState<SymmetryMode>("auto");
+  const [lastResolvedSymmetry, setLastResolvedSymmetry] = useState(1);
 
-  const memoryLabel = useMemo(
-    () => `${memory.length.toString().padStart(2, "0")} / ${MAX_ECHOES}`,
-    [memory.length],
+  const symmetryDisplay = useMemo(
+    () => formatSymmetryMode(symmetryMode, lastResolvedSymmetry),
+    [lastResolvedSymmetry, symmetryMode],
   );
+  const decayLabel = `${(ECHO_TRAIL_DECAY_MS / 1000).toFixed(1)}s`;
+  const replayLabel = demoAwake ? "DEMO" : LOOP_ENABLED ? "ON" : "OFF";
+  const whisperLabel = demoAwake
+    ? "the surface is replaying its own memory"
+    : activeCount > 0
+      ? "keep moving until the ghosts start answering back"
+      : "tap • trace • hold";
 
   const syncMemory = () => {
     setMemory(
@@ -1013,6 +1360,35 @@ export function EchoSurface({
 
   const syncActiveCount = () => {
     setActiveCount(simulationRef.current.activeTouches.size);
+  };
+
+  const resolveSymmetry = (point: NormalizedPoint) => {
+    const mode = symmetryModeRef.current;
+    const symmetry = mode === "auto" ? chooseSymmetry(point) : mode;
+
+    setLastResolvedSymmetry(symmetry);
+    return symmetry;
+  };
+
+  const cycleSymmetryMode = () => {
+    const now = performance.now();
+
+    setSymmetryMode((current) => {
+      const currentIndex = SYMMETRY_MODE_SEQUENCE.indexOf(current);
+      const next =
+        SYMMETRY_MODE_SEQUENCE[
+          (currentIndex + 1) % SYMMETRY_MODE_SEQUENCE.length
+        ];
+
+      symmetryModeRef.current = next;
+      if (next !== "auto") {
+        setLastResolvedSymmetry(next);
+      }
+      return next;
+    });
+
+    lastInteractionAtRef.current = now;
+    syncDemoState(false);
   };
 
   const ensureAudio = async () => {
@@ -1311,7 +1687,12 @@ export function EchoSurface({
     simulationRef.current.pulses.push({
       id: pulseIdRef.current++,
       bornAt: performance.now(),
-      ttl: source === "ghost" ? 1650 : source === "collision" ? 980 : 1450,
+      ttl:
+        source === "collision"
+          ? 1280
+          : source === "hold"
+            ? 2200
+            : 2400,
       point,
       hue,
       strength: clamp(strength, 0.18, 1.7),
@@ -1328,6 +1709,88 @@ export function EchoSurface({
       bornAt: performance.now(),
       ttl: 540,
     });
+  };
+
+  const pushInterference = (
+    point: NormalizedPoint,
+    hue: number,
+    strength: number,
+    symmetry: number,
+    secondaryPoint?: NormalizedPoint,
+  ) => {
+    simulationRef.current.interferenceEvents.push({
+      id: interferenceIdRef.current++,
+      bornAt: performance.now(),
+      ttl: 1200,
+      point,
+      secondaryPoint,
+      hue,
+      strength: clamp(strength, 0.24, 1.4),
+      symmetry,
+    });
+  };
+
+  const syncDemoState = (value: boolean) => {
+    if (demoStateRef.current === value) {
+      return;
+    }
+
+    demoStateRef.current = value;
+    setDemoAwake(value);
+  };
+
+  const wakeSurfaceMemory = (now: number) => {
+    const state = simulationRef.current;
+
+    if (state.echoes.length === 0) {
+      const gesture = DEMO_LIBRARY[demoCursorRef.current % DEMO_LIBRARY.length];
+      const hue = 34 + (demoCursorRef.current * 38) % 150;
+      const symmetry = resolveSymmetry(averagePoint(gesture));
+
+      demoCursorRef.current += 1;
+      state.echoes = [
+        ...state.echoes,
+        createEchoRecord({
+          id: echoIdRef.current++,
+          bornAt: now - 200,
+          hue,
+          symmetry,
+          holdCharge: 0.16,
+          points: gesture.map((entry) => ({ ...entry })),
+          delay: 180,
+          speed: 0.88,
+          phase: 0,
+          resonance: 0.64,
+          energy: 0.96,
+          drift: Math.random() * TAU,
+          wobble: 0.003,
+          lineWidth: 2,
+          synthetic: true,
+          replayIntervalMs: 960,
+        }),
+      ].slice(-MAX_ECHOES);
+      pushPulse(averagePoint(gesture), hue, 0.32, symmetry, "ghost");
+      pushSpark(averagePoint(gesture), hue, 0.3);
+      playTone(hue, 0.18, "ghost");
+      syncMemory();
+      return;
+    }
+
+    const echo = state.echoes[demoCursorRef.current % state.echoes.length];
+    demoCursorRef.current += 1;
+    echo.resonance = clamp(echo.resonance + 0.24, 0.08, 1.5);
+    echo.phase = (echo.phase + echo.duration * 0.18) % echo.duration;
+    const sample = samplePath(echo.points, echo.phase);
+    pushPulse(sample.point, echo.hue, 0.36 + echo.resonance * 0.1, echo.symmetry, "ghost");
+    pushSpark(sample.point, echo.hue, 0.34);
+
+    if (now - lastGhostToneAtRef.current > 160) {
+      lastGhostToneAtRef.current = now;
+      playTone(echo.hue, 0.16 + echo.resonance * 0.1, "ghost");
+      triggerNoiseBurst(echo.hue, 0.12 + echo.resonance * 0.08, "hat");
+    }
+
+    setLastResolvedSymmetry(echo.symmetry);
   };
 
   const finalizeTouch = (pointerId: number) => {
@@ -1349,19 +1812,19 @@ export function EchoSurface({
     const centroid = averagePoint(points);
     const stillness = clamp(1 - touch.travel * 1.7, 0, 1);
     const holdCharge = clamp(touch.holdCharge * 0.7 + stillness * 0.28, 0, 1);
-    const symmetry = clamp(
-      touch.symmetry + Math.round(holdCharge * 2),
-      3,
-      6,
+    const symmetry = Math.max(
+      touch.symmetry,
+      clamp(touch.symmetry + Math.round(holdCharge * 2), 3, 6),
     );
     const energy = clamp(0.52 + touch.travel * 1.1 + holdCharge * 0.92, 0.52, 1.9);
     const lineWidth = 1.2 + holdCharge * 2.2 + Math.min(touch.travel * 8, 2);
+    const now = performance.now();
 
     simulationRef.current.echoes = [
       ...simulationRef.current.echoes,
       {
         id: echoIdRef.current++,
-        bornAt: performance.now(),
+        bornAt: now,
         hue: touch.hue,
         symmetry,
         holdCharge,
@@ -1376,6 +1839,10 @@ export function EchoSurface({
         drift: Math.random() * TAU,
         wobble: 0.002 + holdCharge * 0.005,
         lineWidth,
+        trailDecayMs: ECHO_TRAIL_DECAY_MS,
+        memoryLifeMs: ECHO_MEMORY_LIFE_MS,
+        replayIntervalMs: 720 + Math.random() * 460,
+        synthetic: false,
         lastEchoPulseAt: 0,
         lastBoostAt: 0,
       },
@@ -1384,10 +1851,13 @@ export function EchoSurface({
     simulationRef.current.interactions += 1;
     pushPulse(points.at(-1) ?? centroid, touch.hue, 0.72 + holdCharge * 0.48, symmetry, "touch");
     playTone(touch.hue, 0.6 + holdCharge * 0.5, "tap");
-    if (performance.now() - lastKickAtRef.current > 110) {
-      lastKickAtRef.current = performance.now();
+    if (now - lastKickAtRef.current > 110) {
+      lastKickAtRef.current = now;
       triggerKick(touch.hue, 0.34 + holdCharge * 0.36);
     }
+    lastInteractionAtRef.current = now;
+    syncDemoState(false);
+    setLastResolvedSymmetry(symmetry);
     syncMemory();
   };
 
@@ -1402,7 +1872,16 @@ export function EchoSurface({
     pulseIdRef.current = snapshot.nextPulseId;
     syncMemory();
     syncActiveCount();
+    setLastResolvedSymmetry(
+      snapshot.state.echoes.at(-1)?.symmetry ??
+        snapshot.state.activeTouches.values().next().value?.symmetry ??
+        1,
+    );
   }, [preset]);
+
+  useEffect(() => {
+    symmetryModeRef.current = symmetryMode;
+  }, [symmetryMode]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -1446,6 +1925,25 @@ export function EchoSurface({
       const state = simulationRef.current;
       const liveFilaments: Filament[] = [];
       const ghostSnapshots: GhostSnapshot[] = [];
+      const idleForMs = now - lastInteractionAtRef.current;
+      const demoModeActive =
+        idleForMs > IDLE_DEMO_AFTER_MS && state.activeTouches.size === 0;
+
+      syncDemoState(demoModeActive);
+
+      if (demoModeActive && now - lastDemoAtRef.current > DEMO_INTERVAL_MS) {
+        lastDemoAtRef.current = now;
+        wakeSurfaceMemory(now);
+      }
+
+      const echoCountBeforeDecay = state.echoes.length;
+      state.echoes = state.echoes.filter(
+        (echo) => now - echo.bornAt < echo.memoryLifeMs,
+      );
+
+      if (state.echoes.length !== echoCountBeforeDecay) {
+        syncMemory();
+      }
 
       context.clearRect(0, 0, size.width, size.height);
 
@@ -1458,7 +1956,9 @@ export function EchoSurface({
 
       const ambientEnergy = Math.min(
         1.2,
-        state.echoes.length * 0.022 + state.activeTouches.size * 0.12,
+        state.echoes.length * 0.026 +
+          state.activeTouches.size * 0.14 +
+          state.interferenceEvents.length * 0.06,
       );
       const ambientGlow = context.createRadialGradient(
         size.width * 0.5,
@@ -1497,7 +1997,11 @@ export function EchoSurface({
       for (const touch of state.activeTouches.values()) {
         const holdAge = now - touch.bornAt;
         const stillness = clamp(1 - touch.travel * 1.8, 0, 1);
-        touch.holdCharge = clamp(((holdAge - 180) / 1450) * stillness, 0, 1);
+        touch.holdCharge = clamp(
+          easeInOutSine(clamp((holdAge - 120) / 1320, 0, 1)) * stillness,
+          0,
+          1,
+        );
 
         if (touch.holdCharge > 0.08 && now - touch.lastPulseAt > 240 - touch.holdCharge * 90) {
           const point = touch.points.at(-1);
@@ -1514,14 +2018,17 @@ export function EchoSurface({
           size,
           touch.points,
           touch.symmetry,
-          `hsla(${touch.hue}, 94%, 72%, 0.38)`,
-          1.2 + touch.holdCharge * 3.2,
+          `hsla(${touch.hue}, 94%, 76%, 0.48)`,
+          1.6 + touch.holdCharge * 3.6,
         );
         drawTouchNode(context, size, touch, now);
       }
 
       state.echoes.forEach((echo) => {
-        echo.resonance = Math.max(0.08, echo.resonance - delta * 0.00012);
+        const age = now - echo.bornAt;
+        const trailFade = clamp(1 - age / echo.trailDecayMs, 0, 1);
+        const memoryFade = clamp(1 - age / echo.memoryLifeMs, 0, 1);
+        echo.resonance = Math.max(0.08 * memoryFade, echo.resonance - delta * 0.00009);
 
         const activeAge = now - echo.bornAt - echo.delay;
         const pathTime = activeAge <= 0 ? 0 : ((activeAge * echo.speed + echo.phase) % echo.duration);
@@ -1543,39 +2050,89 @@ export function EchoSurface({
           t: sample.point.t,
         };
 
-        drawPath(
+        drawMemoryBloom(
           context,
           size,
-          echo.points,
+          echo.centroid,
+          echo.hue,
           echo.symmetry,
-          `hsla(${echo.hue}, 84%, 66%, ${0.08 + echo.resonance * 0.06})`,
-          echo.lineWidth,
-          0.6,
+          0.06 + memoryFade * 0.18 + trailFade * 0.12 + echo.resonance * 0.04,
+          echo.drift,
+          now,
         );
 
-        if (activeAge > 0) {
+        if (trailFade > 0.01) {
+          context.save();
+          context.shadowBlur = 18 + trailFade * 26;
+          context.shadowColor = `hsla(${echo.hue}, 88%, 70%, ${
+            trailFade * 0.22
+          })`;
+          drawPath(
+            context,
+            size,
+            echo.points,
+            echo.symmetry,
+            `hsla(${echo.hue}, 90%, 76%, ${trailFade * 0.22})`,
+            echo.lineWidth * (1.4 + trailFade * 0.8),
+            0.72,
+          );
+          context.restore();
+
+          drawPath(
+            context,
+            size,
+            echo.points,
+            echo.symmetry,
+            `hsla(${echo.hue}, 84%, 68%, ${
+              0.04 + trailFade * 0.24 + echo.resonance * 0.03
+            })`,
+            echo.lineWidth,
+            0.78,
+          );
+        }
+
+        if (activeAge > 0 && memoryFade > 0.02) {
           const ghost = {
             echoId: echo.id,
             point: ghostPoint,
             nextPoint: sample.nextPoint,
             hue: echo.hue,
-            intensity: Math.min(1.2, 0.35 + echo.energy * 0.26 + shimmer + echo.resonance * 0.35),
+            intensity: Math.min(
+              1.2,
+              (0.24 + echo.energy * 0.22 + shimmer + echo.resonance * 0.26) *
+                (0.34 + memoryFade * 0.9),
+            ),
             symmetry: echo.symmetry,
-            resonance: echo.resonance,
+            resonance: echo.resonance * (0.5 + memoryFade * 0.5),
           };
 
           ghostSnapshots.push(ghost);
           drawGhostNode(context, size, ghost, now);
 
-          if (now - echo.lastEchoPulseAt > 780 - echo.energy * 120) {
+          if (
+            LOOP_ENABLED &&
+            now - echo.lastEchoPulseAt >
+              echo.replayIntervalMs - echo.energy * 90
+          ) {
             echo.lastEchoPulseAt = now;
-            pushPulse(ghostPoint, echo.hue, 0.18 + echo.energy * 0.22 + echo.resonance * 0.18, echo.symmetry, "ghost");
+            pushPulse(
+              ghostPoint,
+              echo.hue,
+              (0.16 + echo.energy * 0.18 + echo.resonance * 0.14) *
+                (0.3 + memoryFade * 0.7),
+              echo.symmetry,
+              "ghost",
+            );
             if (now - lastGhostToneAtRef.current > 180) {
               lastGhostToneAtRef.current = now;
-              playTone(echo.hue, 0.12 + echo.resonance * 0.12, "ghost");
+              playTone(
+                echo.hue,
+                (0.12 + echo.resonance * 0.1) * (0.4 + memoryFade * 0.6),
+                "ghost",
+              );
               triggerNoiseBurst(
                 echo.hue,
-                0.14 + echo.resonance * 0.12,
+                (0.12 + echo.resonance * 0.08) * (0.3 + memoryFade * 0.7),
                 "hat",
               );
             }
@@ -1585,8 +2142,80 @@ export function EchoSurface({
 
       state.pulses = state.pulses.filter((pulse) => now - pulse.bornAt < pulse.ttl);
       state.sparks = state.sparks.filter((spark) => now - spark.bornAt < spark.ttl);
+      state.interferenceEvents = state.interferenceEvents.filter(
+        (event) => now - event.bornAt < event.ttl,
+      );
 
       state.pulses.forEach((pulse) => drawPulse(context, size, pulse, now));
+
+      const pulseFronts = state.pulses
+        .map((pulse) => ({
+          pulse,
+          front: getPulseFront(pulse, now, size),
+          center: normalizedToPixels(pulse.point, size),
+        }))
+        .filter(
+          ({ front }) => front.progress > 0.06 && front.progress < 0.98 && front.alpha > 0.05,
+        );
+
+      for (let index = 0; index < pulseFronts.length; index += 1) {
+        const current = pulseFronts[index];
+
+        for (let compareIndex = index + 1; compareIndex < pulseFronts.length; compareIndex += 1) {
+          const other = pulseFronts[compareIndex];
+          const pairKey =
+            current.pulse.id < other.pulse.id
+              ? `${current.pulse.id}-${other.pulse.id}`
+              : `${other.pulse.id}-${current.pulse.id}`;
+          const lastTriggeredAt = interferenceCooldownRef.current.get(pairKey) ?? 0;
+          const ringDifference = Math.abs(current.front.radius - other.front.radius);
+          const tolerance = current.front.thickness + other.front.thickness;
+
+          if (ringDifference > tolerance * 1.3 || now - lastTriggeredAt < 180) {
+            continue;
+          }
+
+          const intersections = circleIntersections(
+            current.center,
+            current.front.radius,
+            other.center,
+            other.front.radius,
+          );
+
+          if (intersections.length === 0) {
+            continue;
+          }
+
+          interferenceCooldownRef.current.set(pairKey, now);
+          const blend = clamp(1 - ringDifference / Math.max(tolerance, 1), 0, 1);
+          const hue = mix(current.pulse.hue, other.pulse.hue, 0.5);
+          const symmetry = Math.max(current.pulse.symmetry, other.pulse.symmetry);
+          const primary = pixelsToNormalized(intersections[0], size);
+          const secondary =
+            intersections[1] &&
+            Math.hypot(
+              intersections[0].x - intersections[1].x,
+              intersections[0].y - intersections[1].y,
+            ) > 12
+              ? pixelsToNormalized(intersections[1], size)
+              : undefined;
+
+          pushInterference(primary, hue, 0.46 + blend * 0.54, symmetry, secondary);
+          pushPulse(primary, hue, 0.22 + blend * 0.34, symmetry, "collision");
+          pushSpark(primary, hue, 0.42 + blend * 0.26);
+
+          if (secondary) {
+            pushPulse(secondary, hue, 0.18 + blend * 0.24, symmetry, "ghost");
+            pushSpark(secondary, hue, 0.32 + blend * 0.22);
+          }
+
+          if (now - lastCollisionToneAtRef.current > 120) {
+            lastCollisionToneAtRef.current = now;
+            playTone(hue, 0.24 + blend * 0.2, "collision");
+            triggerNoiseBurst(hue, 0.24 + blend * 0.16, "clap");
+          }
+        }
+      }
 
       const activePoints = Array.from(state.activeTouches.values())
         .map((touch) => ({
@@ -1667,6 +2296,9 @@ export function EchoSurface({
       });
 
       liveFilaments.forEach((filament) => drawFilament(context, size, filament));
+      state.interferenceEvents.forEach((event) =>
+        drawInterferenceEvent(context, size, event, now),
+      );
       state.sparks.forEach((spark) => drawSpark(context, size, spark, now));
       animationFrameRef.current = window.requestAnimationFrame(frame);
     };
@@ -1707,7 +2339,7 @@ export function EchoSurface({
     const now = performance.now();
     const point = makeSurfacePoint(event, surface, now);
     const hue = chooseHue(point, simulationRef.current.interactions);
-    const symmetry = chooseSymmetry(point);
+    const symmetry = resolveSymmetry(point);
 
     simulationRef.current.activeTouches.set(event.pointerId, {
       pointerId: event.pointerId,
@@ -1721,6 +2353,8 @@ export function EchoSurface({
       travel: 0,
     });
 
+    lastInteractionAtRef.current = now;
+    syncDemoState(false);
     syncActiveCount();
     pushPulse(point, hue, 0.56, symmetry, "touch");
     playTone(hue, 0.48, "tap");
@@ -1751,6 +2385,8 @@ export function EchoSurface({
 
     const gap = distance(lastPoint, point);
     const elapsed = now - touch.lastSampleAt;
+
+    lastInteractionAtRef.current = now;
 
     if (gap < 0.003 && elapsed < 18) {
       return;
@@ -1791,45 +2427,24 @@ export function EchoSurface({
     simulationRef.current.echoes = [];
     simulationRef.current.pulses = [];
     simulationRef.current.sparks = [];
+    simulationRef.current.interferenceEvents = [];
+    lastInteractionAtRef.current = performance.now();
     syncActiveCount();
     syncMemory();
+    syncDemoState(false);
   };
 
   const toggleMuted = async () => {
     await ensureAudio();
     soundRef.current.muted = !soundRef.current.muted;
+    lastInteractionAtRef.current = performance.now();
+    syncDemoState(false);
     setIsMuted(soundRef.current.muted);
   };
 
   return (
     <section className="surface-panel">
       <div className={`surface-frame${captureMode ? " surface-frame--capture" : ""}`}>
-        {!captureMode ? (
-          <header className="surface-frame__header">
-            <div>
-              <p className="eyebrow">Playable Invariant</p>
-              <h2>Touches leave ghosts.</h2>
-            </div>
-
-            <div className="surface-frame__actions">
-              <button
-                className="surface-button"
-                type="button"
-                onClick={toggleMuted}
-              >
-                {isMuted ? "Wake sound" : "Quiet surface"}
-              </button>
-              <button
-                className="surface-button surface-button--soft"
-                type="button"
-                onClick={clearSurface}
-              >
-                Clear echoes
-              </button>
-            </div>
-          </header>
-        ) : null}
-
         <div
           ref={surfaceRef}
           className={`surface${captureMode ? " surface--capture" : ""}`}
@@ -1841,24 +2456,7 @@ export function EchoSurface({
         >
           <canvas ref={canvasRef} />
 
-          <div className="surface-hud surface-hud--top">
-            <div className="hud-chip">
-              <span>Memory</span>
-              <strong>{memoryLabel}</strong>
-            </div>
-            <div className="hud-chip">
-              <span>Active touch</span>
-              <strong>{activeCount.toString().padStart(2, "0")}</strong>
-            </div>
-          </div>
-
-          <div className="surface-hud surface-hud--bottom">
-            <div className="surface-instruction">
-              <p>Tap to seed ripples.</p>
-              <p>Trace to braid paths.</p>
-              <p>Hold to charge symmetry.</p>
-            </div>
-
+          <div className="surface-cockpit">
             <div className="memory-strip" aria-hidden="true">
               {Array.from({ length: MAX_ECHOES }).map((_, index) => {
                 const chip = memory[index];
@@ -1879,7 +2477,44 @@ export function EchoSurface({
                 );
               })}
             </div>
+
+            <div className="surface-cockpit__readout">
+              <p>ECHO x{memory.length}</p>
+              <p>DECAY {decayLabel}</p>
+              <p>LOOP {replayLabel}</p>
+              <p>SYM {symmetryDisplay}</p>
+            </div>
+
+            {demoAwake ? <span className="surface-cockpit__badge">dreaming</span> : null}
           </div>
+
+          {!captureMode ? (
+            <div className="surface-controls">
+              <button
+                className="surface-tool"
+                type="button"
+                onClick={cycleSymmetryMode}
+              >
+                {symmetryMode === "auto" ? "Auto" : `Sym x${symmetryMode}`}
+              </button>
+              <button className="surface-tool" type="button" onClick={toggleMuted}>
+                {isMuted ? "Sound off" : "Sound on"}
+              </button>
+              <button
+                className="surface-tool surface-tool--soft"
+                type="button"
+                onClick={clearSurface}
+              >
+                Clear
+              </button>
+            </div>
+          ) : null}
+
+          {!captureMode ? (
+            <p className="surface-whisper" aria-live="polite">
+              {whisperLabel}
+            </p>
+          ) : null}
         </div>
       </div>
     </section>

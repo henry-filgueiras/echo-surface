@@ -8,15 +8,15 @@ import { HowToPlay } from "./components/HowToPlay";
 const noteItems = [
   {
     label: "Interaction Thesis",
-    text: "A gesture is not a command here. It is a struck pattern that the surface remembers, rotates, and answers back later as a living echo.",
+    text: "A gesture is not a command here. It is a struck pattern that lingers, dims, returns, and interferes with whatever your hands do next.",
   },
   {
     label: "Invariant",
-    text: "Every touch leaves a ghost. Taps seed ripples, traces braid paths, and holds thicken the response until memory starts performing with you.",
+    text: "Every touch leaves a ghost, and every ghost can still be touched. The surface keeps a short haunted memory instead of resetting to neutral.",
   },
   {
     label: "Future Directions",
-    text: "Pressure, tilt, multi-user interference, and spatial audio could push this toward a room-scale instrument where topology itself becomes composition.",
+    text: "Pressure, multi-hand polyphony, tilt, and spatial audio could turn this into a room instrument where topology, rhythm, and memory become the score.",
   },
 ];
 
@@ -44,8 +44,8 @@ function App() {
           <h1>Echo Surface</h1>
           <p className="director-note__lede">
             A small instrument for tracing, tapping, and holding until the
-            screen starts to feel less like software and more like responsive
-            material.
+            screen starts to feel less like software and more like a living
+            surface haunted by its recent past.
           </p>
         </div>
 

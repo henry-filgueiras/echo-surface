@@ -11,13 +11,13 @@ const guideSteps = [
     title: "2. Trace a phrase",
     image: withBase("guide/trace.png"),
     alt: "Screenshot of Echo Surface with looping traces crossing the surface like braided ribbons.",
-    text: "Drag slowly to write a path into memory. Ghosts replay the motion later, so new gestures can duet with old ones.",
+    text: "Drag slowly to write a path into memory. Ghosts replay the motion later, and overlapping ripple fronts bloom into brighter interference moments.",
   },
   {
     title: "3. Hold to charge it",
     image: withBase("guide/hold.png"),
     alt: "Screenshot of Echo Surface with a charged central hold and stronger symmetry rings.",
-    text: "A still hold thickens symmetry and resonance. The longer you dwell, the more the surface behaves like it has weight and memory.",
+    text: "A still hold thickens symmetry and resonance. The longer you dwell, the more the surface behaves like it has weight, memory, and its own timing.",
   },
 ];
 
@@ -29,7 +29,8 @@ export function HowToPlay() {
         <h2>How to play the instrument</h2>
         <p className="guide-board__lede">
           Three gestures are enough to teach the system. The surface remembers
-          what you do and slowly turns that memory into a partner.
+          what you do, replays it, and lets yesterday's touch collide with the
+          next one.
         </p>
       </div>
 
