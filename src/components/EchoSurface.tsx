@@ -98,7 +98,11 @@ type SurfaceSize = {
 type AudioEngine = {
   context: AudioContext | null;
   master: GainNode | null;
+  compressor: DynamicsCompressorNode | null;
+  fxSend: GainNode | null;
+  noiseBuffer: AudioBuffer | null;
   muted: boolean;
+  masterLevel: number;
 };
 
 type SimulationState = {
@@ -117,6 +121,7 @@ type EchoSurfaceProps = {
 const MAX_ECHOES = 20;
 const TAU = Math.PI * 2;
 const SURFACE_PRESETS: SurfacePreset[] = ["seed", "trace", "hold"];
+type ToneMode = "tap" | "hold" | "ghost" | "collision";
 
 export const isSurfacePreset = (value: string | null): value is SurfacePreset =>
   value !== null && SURFACE_PRESETS.includes(value as SurfacePreset);
@@ -131,6 +136,41 @@ const mix = (a: number, b: number, amount: number) => lerp(a, b, amount);
 
 const distance = (a: NormalizedPoint, b: NormalizedPoint) =>
   Math.hypot(a.x - b.x, a.y - b.y);
+
+const CLUB_SCALE = [0, 3, 5, 7, 10];
+
+const midiToFrequency = (midi: number) => 440 * 2 ** ((midi - 69) / 12);
+
+const createDriveCurve = (amount: number) => {
+  const curve = new Float32Array(256);
+  const degrees = Math.PI / 180;
+
+  for (let index = 0; index < curve.length; index += 1) {
+    const x = index * (2 / (curve.length - 1)) - 1;
+    curve[index] =
+      ((3 + amount) * x * 20 * degrees) / (Math.PI + amount * Math.abs(x));
+  }
+
+  return curve;
+};
+
+const DRIVE_CURVE = createDriveCurve(24);
+
+const pickClubFrequency = (hue: number, mode: ToneMode) => {
+  const root =
+    mode === "hold" ? 38 : mode === "ghost" ? 62 : mode === "collision" ? 57 : 50;
+  const octaves = mode === "hold" ? 2 : 3;
+  const totalSteps = CLUB_SCALE.length * octaves;
+  const normalized = clamp(hue / 204, 0, 0.999);
+  const stepIndex = Math.min(
+    totalSteps - 1,
+    Math.floor(normalized * totalSteps),
+  );
+  const octave = Math.floor(stepIndex / CLUB_SCALE.length);
+  const interval = CLUB_SCALE[stepIndex % CLUB_SCALE.length];
+
+  return midiToFrequency(root + interval + octave * 12);
+};
 
 const normalizedToPixels = (point: NormalizedPoint, size: SurfaceSize) => ({
   x: point.x * size.width,
@@ -932,10 +972,16 @@ export function EchoSurface({
   const sizeRef = useRef<SurfaceSize>({ width: 0, height: 0 });
   const animationFrameRef = useRef<number | null>(null);
   const lastGhostToneAtRef = useRef(0);
+  const lastKickAtRef = useRef(0);
+  const lastCollisionToneAtRef = useRef(0);
   const soundRef = useRef<AudioEngine>({
     context: null,
     master: null,
+    compressor: null,
+    fxSend: null,
+    noiseBuffer: null,
     muted: false,
+    masterLevel: 0.24,
   });
   const pulseIdRef = useRef(0);
   const echoIdRef = useRef(0);
@@ -978,11 +1024,50 @@ export function EchoSurface({
 
     if (!engine.context) {
       const context = new window.AudioContext();
+      const compressor = context.createDynamicsCompressor();
       const master = context.createGain();
-      master.gain.value = 0.12;
+      const fxSend = context.createGain();
+      const delay = context.createDelay(1.2);
+      const feedback = context.createGain();
+      const delayFilter = context.createBiquadFilter();
+      const noiseBuffer = context.createBuffer(
+        1,
+        context.sampleRate,
+        context.sampleRate,
+      );
+      const noiseData = noiseBuffer.getChannelData(0);
+
+      compressor.threshold.value = -18;
+      compressor.knee.value = 22;
+      compressor.ratio.value = 3.6;
+      compressor.attack.value = 0.003;
+      compressor.release.value = 0.2;
+
+      master.gain.value = engine.masterLevel;
+
+      delay.delayTime.value = (60 / 132) * 0.75;
+      feedback.gain.value = 0.42;
+      delayFilter.type = "lowpass";
+      delayFilter.frequency.value = 3200;
+      delayFilter.Q.value = 0.8;
+
+      for (let index = 0; index < noiseData.length; index += 1) {
+        noiseData[index] = Math.random() * 2 - 1;
+      }
+
+      fxSend.connect(delay);
+      delay.connect(delayFilter);
+      delayFilter.connect(feedback);
+      feedback.connect(delay);
+      delayFilter.connect(compressor);
+      compressor.connect(master);
       master.connect(context.destination);
+
       engine.context = context;
       engine.master = master;
+      engine.compressor = compressor;
+      engine.fxSend = fxSend;
+      engine.noiseBuffer = noiseBuffer;
     }
 
     if (engine.context.state === "suspended") {
@@ -990,56 +1075,236 @@ export function EchoSurface({
     }
   };
 
-  const playTone = (hue: number, strength: number, mode: "tap" | "hold" | "ghost") => {
+  const duckMix = (intensity: number, recovery = 0.24) => {
     const engine = soundRef.current;
 
-    if (!engine.context || !engine.master || engine.muted) {
+    if (!engine.context || !engine.master) {
       return;
     }
 
     const now = engine.context.currentTime;
-    const baseFrequency = mode === "hold" ? 124 : mode === "ghost" ? 208 : 172;
-    const frequency = baseFrequency + (hue / 204) * (mode === "ghost" ? 240 : 310);
-    const oscillator = engine.context.createOscillator();
-    const overtone = engine.context.createOscillator();
+    const baseline = engine.masterLevel;
+    const floor = baseline * (1 - clamp(0.16 + intensity * 0.26, 0.16, 0.58));
+
+    engine.master.gain.cancelScheduledValues(now);
+    engine.master.gain.setValueAtTime(
+      Math.max(engine.master.gain.value, baseline),
+      now,
+    );
+    engine.master.gain.linearRampToValueAtTime(floor, now + 0.012);
+    engine.master.gain.exponentialRampToValueAtTime(baseline, now + recovery);
+  };
+
+  const triggerNoiseBurst = (
+    hue: number,
+    intensity: number,
+    flavor: "hat" | "clap",
+  ) => {
+    const engine = soundRef.current;
+
+    if (
+      !engine.context ||
+      !engine.compressor ||
+      !engine.fxSend ||
+      !engine.noiseBuffer ||
+      engine.muted
+    ) {
+      return;
+    }
+
+    const now = engine.context.currentTime;
+    const source = engine.context.createBufferSource();
+    const highpass = engine.context.createBiquadFilter();
+    const bandpass = engine.context.createBiquadFilter();
     const gain = engine.context.createGain();
-    const filter = engine.context.createBiquadFilter();
-    const duration = mode === "hold" ? 0.44 : mode === "ghost" ? 0.24 : 0.31;
+    const send = engine.context.createGain();
 
-    oscillator.type = mode === "hold" ? "triangle" : "sine";
-    overtone.type = "triangle";
-    filter.type = "bandpass";
-    filter.frequency.value = frequency * (mode === "ghost" ? 1.4 : 1.8);
-    filter.Q.value = mode === "hold" ? 1.1 : 5.8;
+    source.buffer = engine.noiseBuffer;
 
-    oscillator.frequency.setValueAtTime(frequency, now);
-    oscillator.frequency.exponentialRampToValueAtTime(
-      Math.max(50, frequency * (mode === "hold" ? 0.72 : 1.14)),
-      now + duration,
-    );
+    highpass.type = "highpass";
+    highpass.frequency.value =
+      flavor === "hat" ? 5200 : 1600 + intensity * 900;
 
-    overtone.frequency.setValueAtTime(frequency * 1.5, now);
-    overtone.frequency.exponentialRampToValueAtTime(
-      frequency * 0.92,
-      now + duration * 0.76,
-    );
+    bandpass.type = "bandpass";
+    bandpass.frequency.value =
+      flavor === "hat" ? 8800 : 2100 + (hue / 204) * 1400;
+    bandpass.Q.value = flavor === "hat" ? 0.9 : 1.6;
 
     gain.gain.setValueAtTime(0.0001, now);
     gain.gain.exponentialRampToValueAtTime(
-      0.028 + strength * (mode === "ghost" ? 0.012 : 0.028),
-      now + 0.02,
+      flavor === "hat" ? 0.055 + intensity * 0.05 : 0.085 + intensity * 0.08,
+      now + 0.004,
+    );
+    gain.gain.exponentialRampToValueAtTime(
+      0.0001,
+      now + (flavor === "hat" ? 0.09 : 0.18),
+    );
+
+    send.gain.value = flavor === "hat" ? 0.06 : 0.14;
+
+    source.connect(highpass);
+    highpass.connect(bandpass);
+    bandpass.connect(gain);
+    gain.connect(engine.compressor);
+    gain.connect(send);
+    send.connect(engine.fxSend);
+
+    source.start(now);
+    source.stop(now + 0.24);
+  };
+
+  const triggerKick = (hue: number, intensity: number) => {
+    const engine = soundRef.current;
+
+    if (!engine.context || !engine.compressor || engine.muted) {
+      return;
+    }
+
+    const now = engine.context.currentTime;
+    const body = engine.context.createOscillator();
+    const punch = engine.context.createOscillator();
+    const bodyGain = engine.context.createGain();
+    const punchGain = engine.context.createGain();
+    const endFrequency = 42 + (hue % 16);
+
+    body.type = "sine";
+    punch.type = "triangle";
+
+    body.frequency.setValueAtTime(158 + intensity * 44, now);
+    body.frequency.exponentialRampToValueAtTime(endFrequency, now + 0.34);
+
+    punch.frequency.setValueAtTime(88 + intensity * 26, now);
+    punch.frequency.exponentialRampToValueAtTime(endFrequency * 1.25, now + 0.16);
+
+    bodyGain.gain.setValueAtTime(0.0001, now);
+    bodyGain.gain.exponentialRampToValueAtTime(
+      0.34 + intensity * 0.34,
+      now + 0.01,
+    );
+    bodyGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.42);
+
+    punchGain.gain.setValueAtTime(0.0001, now);
+    punchGain.gain.exponentialRampToValueAtTime(
+      0.11 + intensity * 0.08,
+      now + 0.006,
+    );
+    punchGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
+
+    body.connect(bodyGain);
+    punch.connect(punchGain);
+    bodyGain.connect(engine.compressor);
+    punchGain.connect(engine.compressor);
+
+    body.start(now);
+    punch.start(now);
+    body.stop(now + 0.5);
+    punch.stop(now + 0.18);
+
+    triggerNoiseBurst(hue, 0.18 + intensity * 0.18, "clap");
+    duckMix(0.7 + intensity * 0.18, 0.22);
+  };
+
+  const playTone = (hue: number, strength: number, mode: ToneMode) => {
+    const engine = soundRef.current;
+
+    if (
+      !engine.context ||
+      !engine.compressor ||
+      !engine.fxSend ||
+      engine.muted
+    ) {
+      return;
+    }
+
+    const now = engine.context.currentTime;
+    const frequency = pickClubFrequency(hue, mode);
+    const primary = engine.context.createOscillator();
+    const secondary = engine.context.createOscillator();
+    const sub = engine.context.createOscillator();
+    const filter = engine.context.createBiquadFilter();
+    const drive = engine.context.createWaveShaper();
+    const gain = engine.context.createGain();
+    const send = engine.context.createGain();
+    const isHold = mode === "hold";
+    const isGhost = mode === "ghost";
+    const isCollision = mode === "collision";
+    const duration = isHold ? 0.76 : isGhost ? 0.34 : isCollision ? 0.2 : 0.56;
+    const peak = isHold
+      ? 0.075 + strength * 0.085
+      : isGhost
+        ? 0.055 + strength * 0.055
+        : isCollision
+          ? 0.06 + strength * 0.045
+          : 0.085 + strength * 0.08;
+    const filterStart = isHold
+      ? 760 + strength * 420
+      : isGhost
+        ? 2200 + strength * 1400
+        : isCollision
+          ? 2800 + strength * 900
+          : 1700 + strength * 2400;
+    const filterEnd = isHold ? 180 : isGhost ? 980 : isCollision ? 700 : 420;
+
+    primary.type = isHold ? "triangle" : "sawtooth";
+    secondary.type = isGhost ? "triangle" : isCollision ? "square" : "sawtooth";
+    sub.type = "sine";
+
+    primary.detune.value = isHold ? -4 : -9;
+    secondary.detune.value = isHold ? 4 : 9;
+
+    primary.frequency.setValueAtTime(frequency, now);
+    primary.frequency.exponentialRampToValueAtTime(
+      Math.max(32, frequency * (isGhost ? 1.02 : isHold ? 0.92 : 0.84)),
+      now + duration,
+    );
+
+    secondary.frequency.setValueAtTime(
+      frequency * (isGhost ? 1.005 : 1.002),
+      now,
+    );
+    secondary.frequency.exponentialRampToValueAtTime(
+      frequency * (isGhost ? 1.2 : 0.96),
+      now + duration * 0.72,
+    );
+
+    sub.frequency.setValueAtTime(frequency * (isGhost ? 1 : 0.5), now);
+    sub.frequency.exponentialRampToValueAtTime(
+      Math.max(30, frequency * (isGhost ? 0.96 : 0.48)),
+      now + duration,
+    );
+
+    filter.type = isGhost ? "bandpass" : "lowpass";
+    filter.Q.value = isHold ? 1.4 : isGhost ? 4.8 : 3.2;
+    filter.frequency.setValueAtTime(filterStart, now);
+    filter.frequency.exponentialRampToValueAtTime(filterEnd, now + duration);
+
+    drive.curve = DRIVE_CURVE;
+    drive.oversample = "2x";
+
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(
+      peak,
+      now + (isCollision ? 0.004 : 0.016),
     );
     gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
 
-    oscillator.connect(filter);
-    overtone.connect(filter);
-    filter.connect(gain);
-    gain.connect(engine.master);
+    send.gain.value = isHold ? 0.14 : isGhost ? 0.34 : isCollision ? 0.1 : 0.24;
 
-    oscillator.start(now);
-    overtone.start(now);
-    oscillator.stop(now + duration + 0.04);
-    overtone.stop(now + duration + 0.04);
+    primary.connect(filter);
+    secondary.connect(filter);
+    sub.connect(filter);
+    filter.connect(drive);
+    drive.connect(gain);
+    gain.connect(engine.compressor);
+    gain.connect(send);
+    send.connect(engine.fxSend);
+
+    primary.start(now);
+    secondary.start(now);
+    sub.start(now);
+    primary.stop(now + duration + 0.06);
+    secondary.stop(now + duration + 0.06);
+    sub.stop(now + duration + 0.06);
   };
 
   const pushPulse = (point: NormalizedPoint, hue: number, strength: number, symmetry: number, source: Pulse["source"]) => {
@@ -1119,6 +1384,10 @@ export function EchoSurface({
     simulationRef.current.interactions += 1;
     pushPulse(points.at(-1) ?? centroid, touch.hue, 0.72 + holdCharge * 0.48, symmetry, "touch");
     playTone(touch.hue, 0.6 + holdCharge * 0.5, "tap");
+    if (performance.now() - lastKickAtRef.current > 110) {
+      lastKickAtRef.current = performance.now();
+      triggerKick(touch.hue, 0.34 + holdCharge * 0.36);
+    }
     syncMemory();
   };
 
@@ -1304,6 +1573,11 @@ export function EchoSurface({
             if (now - lastGhostToneAtRef.current > 180) {
               lastGhostToneAtRef.current = now;
               playTone(echo.hue, 0.12 + echo.resonance * 0.12, "ghost");
+              triggerNoiseBurst(
+                echo.hue,
+                0.14 + echo.resonance * 0.12,
+                "hat",
+              );
             }
           }
         }
@@ -1372,6 +1646,19 @@ export function EchoSurface({
                     mix(touch.hue, ghost.hue, 0.5),
                     0.45 + echo.resonance * 0.22,
                   );
+                  if (now - lastCollisionToneAtRef.current > 90) {
+                    lastCollisionToneAtRef.current = now;
+                    playTone(
+                      mix(touch.hue, ghost.hue, 0.5),
+                      0.3 + echo.resonance * 0.16,
+                      "collision",
+                    );
+                    triggerNoiseBurst(
+                      mix(touch.hue, ghost.hue, 0.5),
+                      0.28 + echo.resonance * 0.16,
+                      "clap",
+                    );
+                  }
                 }
               }
             }
@@ -1403,7 +1690,7 @@ export function EchoSurface({
     };
   }, []);
 
-  const beginTouch = (event: ReactPointerEvent<HTMLDivElement>) => {
+  const beginTouch = async (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.pointerType === "mouse" && event.button !== 0) {
       return;
     }
@@ -1415,7 +1702,7 @@ export function EchoSurface({
     }
 
     surface.setPointerCapture(event.pointerId);
-    void ensureAudio();
+    await ensureAudio();
 
     const now = performance.now();
     const point = makeSurfacePoint(event, surface, now);
@@ -1437,6 +1724,7 @@ export function EchoSurface({
     syncActiveCount();
     pushPulse(point, hue, 0.56, symmetry, "touch");
     playTone(hue, 0.48, "tap");
+    triggerNoiseBurst(hue, 0.12, "hat");
   };
 
   const moveTouch = (event: ReactPointerEvent<HTMLDivElement>) => {

@@ -1,19 +1,21 @@
+const withBase = (path: string) => `${import.meta.env.BASE_URL}${path}`;
+
 const guideSteps = [
   {
     title: "1. Seed the surface",
-    image: "/guide/seed.png",
+    image: withBase("guide/seed.png"),
     alt: "Screenshot of Echo Surface showing mirrored ripple blooms after a light tap.",
     text: "Tap anywhere to strike a mirrored bloom. The surface answers immediately, then stores that touch as a future echo.",
   },
   {
     title: "2. Trace a phrase",
-    image: "/guide/trace.png",
+    image: withBase("guide/trace.png"),
     alt: "Screenshot of Echo Surface with looping traces crossing the surface like braided ribbons.",
     text: "Drag slowly to write a path into memory. Ghosts replay the motion later, so new gestures can duet with old ones.",
   },
   {
     title: "3. Hold to charge it",
-    image: "/guide/hold.png",
+    image: withBase("guide/hold.png"),
     alt: "Screenshot of Echo Surface with a charged central hold and stronger symmetry rings.",
     text: "A still hold thickens symmetry and resonance. The longer you dwell, the more the surface behaves like it has weight and memory.",
   },
