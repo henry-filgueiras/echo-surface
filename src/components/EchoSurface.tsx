@@ -145,6 +145,10 @@ const ECHO_TRAIL_DECAY_MS = 2400;
 const ECHO_MEMORY_LIFE_MS = 14000;
 const IDLE_DEMO_AFTER_MS = 11000;
 const DEMO_INTERVAL_MS = 2800;
+const MAX_ACTIVE_PULSES = 32;
+const MAX_ACTIVE_SPARKS = 48;
+const MAX_ACTIVE_INTERFERENCE_EVENTS = 18;
+const MAX_INTERFERENCE_FRONTS = 18;
 
 export const isSurfacePreset = (value: string | null): value is SurfacePreset =>
   value !== null && SURFACE_PRESETS.includes(value as SurfacePreset);
@@ -1689,16 +1693,25 @@ export function EchoSurface({
       bornAt: performance.now(),
       ttl:
         source === "collision"
-          ? 1280
+          ? 880
           : source === "hold"
-            ? 2200
-            : 2400,
+            ? 1800
+            : source === "ghost"
+              ? 1650
+              : 1500,
       point,
       hue,
       strength: clamp(strength, 0.18, 1.7),
       symmetry,
       source,
     });
+
+    if (simulationRef.current.pulses.length > MAX_ACTIVE_PULSES) {
+      simulationRef.current.pulses.splice(
+        0,
+        simulationRef.current.pulses.length - MAX_ACTIVE_PULSES,
+      );
+    }
   };
 
   const pushSpark = (point: NormalizedPoint, hue: number, strength: number) => {
@@ -1709,6 +1722,13 @@ export function EchoSurface({
       bornAt: performance.now(),
       ttl: 540,
     });
+
+    if (simulationRef.current.sparks.length > MAX_ACTIVE_SPARKS) {
+      simulationRef.current.sparks.splice(
+        0,
+        simulationRef.current.sparks.length - MAX_ACTIVE_SPARKS,
+      );
+    }
   };
 
   const pushInterference = (
@@ -1728,6 +1748,17 @@ export function EchoSurface({
       strength: clamp(strength, 0.24, 1.4),
       symmetry,
     });
+
+    if (
+      simulationRef.current.interferenceEvents.length >
+      MAX_ACTIVE_INTERFERENCE_EVENTS
+    ) {
+      simulationRef.current.interferenceEvents.splice(
+        0,
+        simulationRef.current.interferenceEvents.length -
+          MAX_ACTIVE_INTERFERENCE_EVENTS,
+      );
+    }
   };
 
   const syncDemoState = (value: boolean) => {
@@ -1870,6 +1901,7 @@ export function EchoSurface({
     simulationRef.current = snapshot.state;
     echoIdRef.current = snapshot.nextEchoId;
     pulseIdRef.current = snapshot.nextPulseId;
+    interferenceCooldownRef.current.clear();
     syncMemory();
     syncActiveCount();
     setLastResolvedSymmetry(
@@ -2146,9 +2178,20 @@ export function EchoSurface({
         (event) => now - event.bornAt < event.ttl,
       );
 
+      const activePulseIds = new Set(state.pulses.map((pulse) => pulse.id));
+      interferenceCooldownRef.current.forEach((_, pairKey) => {
+        const [leftId, rightId] = pairKey.split("-").map(Number);
+
+        if (!activePulseIds.has(leftId) || !activePulseIds.has(rightId)) {
+          interferenceCooldownRef.current.delete(pairKey);
+        }
+      });
+
       state.pulses.forEach((pulse) => drawPulse(context, size, pulse, now));
 
       const pulseFronts = state.pulses
+        .filter((pulse) => pulse.source !== "collision")
+        .slice(-MAX_INTERFERENCE_FRONTS)
         .map((pulse) => ({
           pulse,
           front: getPulseFront(pulse, now, size),
@@ -2167,11 +2210,13 @@ export function EchoSurface({
             current.pulse.id < other.pulse.id
               ? `${current.pulse.id}-${other.pulse.id}`
               : `${other.pulse.id}-${current.pulse.id}`;
-          const lastTriggeredAt = interferenceCooldownRef.current.get(pairKey) ?? 0;
           const ringDifference = Math.abs(current.front.radius - other.front.radius);
           const tolerance = current.front.thickness + other.front.thickness;
 
-          if (ringDifference > tolerance * 1.3 || now - lastTriggeredAt < 180) {
+          if (
+            ringDifference > tolerance * 1.3 ||
+            interferenceCooldownRef.current.has(pairKey)
+          ) {
             continue;
           }
 
@@ -2205,7 +2250,6 @@ export function EchoSurface({
           pushSpark(primary, hue, 0.42 + blend * 0.26);
 
           if (secondary) {
-            pushPulse(secondary, hue, 0.18 + blend * 0.24, symmetry, "ghost");
             pushSpark(secondary, hue, 0.32 + blend * 0.22);
           }
 
@@ -2428,6 +2472,7 @@ export function EchoSurface({
     simulationRef.current.pulses = [];
     simulationRef.current.sparks = [];
     simulationRef.current.interferenceEvents = [];
+    interferenceCooldownRef.current.clear();
     lastInteractionAtRef.current = performance.now();
     syncActiveCount();
     syncMemory();
