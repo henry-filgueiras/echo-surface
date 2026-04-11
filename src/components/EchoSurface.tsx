@@ -97,6 +97,19 @@ type InterferenceEvent = {
   symmetry: number;
 };
 
+type ResonanceWell = {
+  id: number;
+  bornAt: number;
+  ttl: number;
+  point: NormalizedPoint;
+  hue: number;
+  symmetry: number;
+  energy: number;
+  drift: number;
+  lastPulseAt: number;
+  lastToneAt: number;
+};
+
 type MemoryChip = {
   id: number;
   hue: number;
@@ -127,6 +140,7 @@ type SimulationState = {
   pulses: Pulse[];
   sparks: Spark[];
   interferenceEvents: InterferenceEvent[];
+  wells: ResonanceWell[];
   interactions: number;
 };
 
@@ -149,6 +163,8 @@ const MAX_ACTIVE_PULSES = 32;
 const MAX_ACTIVE_SPARKS = 48;
 const MAX_ACTIVE_INTERFERENCE_EVENTS = 18;
 const MAX_INTERFERENCE_FRONTS = 18;
+const MAX_WELLS = 3;
+const WELL_TTL_MS = 18000;
 
 export const isSurfacePreset = (value: string | null): value is SurfacePreset =>
   value !== null && SURFACE_PRESETS.includes(value as SurfacePreset);
@@ -843,6 +859,83 @@ const drawMemoryBloom = (
   context.restore();
 };
 
+const drawResonanceWell = (
+  context: CanvasRenderingContext2D,
+  size: SurfaceSize,
+  well: ResonanceWell,
+  now: number,
+) => {
+  const age = now - well.bornAt;
+  const life = clamp(1 - age / well.ttl, 0, 1);
+  const shimmer = 0.78 + Math.sin(now * 0.0012 + well.drift) * 0.14;
+  const copyCount = Math.max(well.symmetry, 1);
+
+  context.save();
+  context.globalCompositeOperation = "screen";
+
+  for (let copyIndex = 0; copyIndex < copyCount; copyIndex += 1) {
+    const angle = (copyIndex / copyCount) * TAU;
+    const rotated = rotatePoint(well.point, angle);
+    const pixel = normalizedToPixels(rotated, size);
+    const radius = (11 + well.energy * 10) * (0.9 + shimmer * 0.18);
+    const gradient = context.createRadialGradient(
+      pixel.x,
+      pixel.y,
+      0,
+      pixel.x,
+      pixel.y,
+      radius * 2.6,
+    );
+
+    gradient.addColorStop(
+      0,
+      `hsla(${well.hue}, 92%, 82%, ${(0.22 + well.energy * 0.08) * life})`,
+    );
+    gradient.addColorStop(
+      0.5,
+      `hsla(${well.hue}, 88%, 68%, ${(0.1 + well.energy * 0.04) * life})`,
+    );
+    gradient.addColorStop(1, `hsla(${well.hue}, 84%, 60%, 0)`);
+
+    context.fillStyle = gradient;
+    context.beginPath();
+    context.arc(pixel.x, pixel.y, radius * 2.6, 0, TAU);
+    context.fill();
+
+    context.strokeStyle = `hsla(${well.hue}, 94%, 84%, ${(0.22 + well.energy * 0.12) * life})`;
+    context.lineWidth = 1 + well.energy * 1.8;
+    context.beginPath();
+    context.arc(pixel.x, pixel.y, radius * 1.2, 0, TAU);
+    context.stroke();
+
+    context.strokeStyle = `hsla(${well.hue}, 88%, 76%, ${(0.1 + well.energy * 0.08) * life})`;
+    context.lineWidth = 1;
+    context.beginPath();
+    context.arc(pixel.x, pixel.y, radius * (1.9 + shimmer * 0.14), 0, TAU);
+    context.stroke();
+
+    for (let satelliteIndex = 0; satelliteIndex < 2; satelliteIndex += 1) {
+      const orbitAngle =
+        now * 0.0011 * (0.9 + well.energy * 0.18) +
+        well.drift +
+        satelliteIndex * Math.PI +
+        copyIndex * 0.12;
+      const orbitRadius = radius * (1.55 + satelliteIndex * 0.42);
+      const satellite = {
+        x: pixel.x + Math.cos(orbitAngle) * orbitRadius,
+        y: pixel.y + Math.sin(orbitAngle) * orbitRadius,
+      };
+
+      context.fillStyle = `hsla(${well.hue}, 100%, 88%, ${(0.42 + well.energy * 0.16) * life})`;
+      context.beginPath();
+      context.arc(satellite.x, satellite.y, 1.8 + well.energy * 0.9, 0, TAU);
+      context.fill();
+    }
+  }
+
+  context.restore();
+};
+
 const chooseHue = (point: NormalizedPoint, interactions: number) => {
   const seed = point.x * 128 + point.y * 54 + interactions * 19;
   return 18 + (seed % 186);
@@ -943,10 +1036,42 @@ const createEchoRecord = ({
   lastBoostAt: bornAt - 1200,
 });
 
+const createWellRecord = ({
+  id,
+  bornAt,
+  point,
+  hue,
+  symmetry,
+  energy,
+  drift,
+  ttl = WELL_TTL_MS,
+}: {
+  id: number;
+  bornAt: number;
+  point: NormalizedPoint;
+  hue: number;
+  symmetry: number;
+  energy: number;
+  drift: number;
+  ttl?: number;
+}): ResonanceWell => ({
+  id,
+  bornAt,
+  ttl,
+  point,
+  hue,
+  symmetry,
+  energy,
+  drift,
+  lastPulseAt: bornAt - 900,
+  lastToneAt: bornAt - 1200,
+});
+
 const createPresetState = (preset: SurfacePreset, now: number) => {
   const activeTouches = new Map<number, ActiveTouch>();
   let nextEchoId = 0;
   let nextPulseId = 0;
+  let nextWellId = 0;
 
   if (preset === "seed") {
     const echoes = [
@@ -1058,10 +1183,12 @@ const createPresetState = (preset: SurfacePreset, now: number) => {
         pulses,
         sparks: [],
         interferenceEvents: [],
+        wells: [],
         interactions: echoes.length,
       },
       nextEchoId,
       nextPulseId,
+      nextWellId,
     };
   }
 
@@ -1177,10 +1304,12 @@ const createPresetState = (preset: SurfacePreset, now: number) => {
         pulses,
         sparks,
         interferenceEvents: [],
+        wells: [],
         interactions: echoes.length,
       },
       nextEchoId,
       nextPulseId,
+      nextWellId,
     };
   }
 
@@ -1289,10 +1418,22 @@ const createPresetState = (preset: SurfacePreset, now: number) => {
         },
       ],
       interferenceEvents: [],
+      wells: [
+        createWellRecord({
+          id: nextWellId++,
+          bornAt: now - 2400,
+          point: point(0.515, 0.486, now - 2400),
+          hue: 136,
+          symmetry: 6,
+          energy: 0.82,
+          drift: 1.6,
+        }),
+      ],
       interactions: echoes.length,
     },
     nextEchoId,
     nextPulseId,
+    nextWellId,
   };
 };
 
@@ -1318,6 +1459,7 @@ export function EchoSurface({
   });
   const pulseIdRef = useRef(0);
   const echoIdRef = useRef(0);
+  const wellIdRef = useRef(0);
   const interferenceIdRef = useRef(0);
   const lastInteractionAtRef = useRef(performance.now());
   const lastDemoAtRef = useRef(0);
@@ -1331,6 +1473,7 @@ export function EchoSurface({
     pulses: [],
     sparks: [],
     interferenceEvents: [],
+    wells: [],
     interactions: 0,
   });
   const [memory, setMemory] = useState<MemoryChip[]>([]);
@@ -1350,7 +1493,7 @@ export function EchoSurface({
     ? "the surface is replaying its own memory"
     : activeCount > 0
       ? "keep moving until the ghosts start answering back"
-      : "tap • trace • hold";
+      : "tap • trace • hold still to plant a listening point";
 
   const syncMemory = () => {
     setMemory(
@@ -1761,6 +1904,39 @@ export function EchoSurface({
     }
   };
 
+  const pushWell = (
+    point: NormalizedPoint,
+    hue: number,
+    energy: number,
+    symmetry: number,
+  ) => {
+    const state = simulationRef.current;
+    const existing = state.wells.find((well) => distance(well.point, point) < 0.08);
+    const now = performance.now();
+
+    if (existing) {
+      existing.bornAt = now;
+      existing.hue = mix(existing.hue, hue, 0.55);
+      existing.energy = clamp(existing.energy + energy * 0.3, 0.3, 1.6);
+      existing.symmetry = Math.max(existing.symmetry, symmetry);
+      existing.lastPulseAt = now - 260;
+      return;
+    }
+
+    state.wells = [
+      ...state.wells,
+      createWellRecord({
+        id: wellIdRef.current++,
+        bornAt: now,
+        point,
+        hue,
+        symmetry,
+        energy: clamp(energy, 0.42, 1.2),
+        drift: Math.random() * TAU,
+      }),
+    ].slice(-MAX_WELLS);
+  };
+
   const syncDemoState = (value: boolean) => {
     if (demoStateRef.current === value) {
       return;
@@ -1850,6 +2026,7 @@ export function EchoSurface({
     const energy = clamp(0.52 + touch.travel * 1.1 + holdCharge * 0.92, 0.52, 1.9);
     const lineWidth = 1.2 + holdCharge * 2.2 + Math.min(touch.travel * 8, 2);
     const now = performance.now();
+    const endpoint = points.at(-1) ?? centroid;
 
     simulationRef.current.echoes = [
       ...simulationRef.current.echoes,
@@ -1880,12 +2057,25 @@ export function EchoSurface({
     ].slice(-MAX_ECHOES);
 
     simulationRef.current.interactions += 1;
-    pushPulse(points.at(-1) ?? centroid, touch.hue, 0.72 + holdCharge * 0.48, symmetry, "touch");
+    pushPulse(endpoint, touch.hue, 0.72 + holdCharge * 0.48, symmetry, "touch");
     playTone(touch.hue, 0.6 + holdCharge * 0.5, "tap");
     if (now - lastKickAtRef.current > 110) {
       lastKickAtRef.current = now;
       triggerKick(touch.hue, 0.34 + holdCharge * 0.36);
     }
+
+    if (holdCharge > 0.44 && stillness > 0.72) {
+      pushWell(
+        centroid,
+        touch.hue,
+        0.56 + holdCharge * 0.42,
+        Math.max(2, symmetry),
+      );
+      pushPulse(centroid, touch.hue, 0.34 + holdCharge * 0.24, symmetry, "hold");
+      pushSpark(centroid, touch.hue, 0.34 + holdCharge * 0.18);
+      playTone(touch.hue, 0.22 + holdCharge * 0.14, "hold");
+    }
+
     lastInteractionAtRef.current = now;
     syncDemoState(false);
     setLastResolvedSymmetry(symmetry);
@@ -1901,6 +2091,7 @@ export function EchoSurface({
     simulationRef.current = snapshot.state;
     echoIdRef.current = snapshot.nextEchoId;
     pulseIdRef.current = snapshot.nextPulseId;
+    wellIdRef.current = snapshot.nextWellId;
     interferenceCooldownRef.current.clear();
     syncMemory();
     syncActiveCount();
@@ -1972,6 +2163,7 @@ export function EchoSurface({
       state.echoes = state.echoes.filter(
         (echo) => now - echo.bornAt < echo.memoryLifeMs,
       );
+      state.wells = state.wells.filter((well) => now - well.bornAt < well.ttl);
 
       if (state.echoes.length !== echoCountBeforeDecay) {
         syncMemory();
@@ -1990,7 +2182,8 @@ export function EchoSurface({
         1.2,
         state.echoes.length * 0.026 +
           state.activeTouches.size * 0.14 +
-          state.interferenceEvents.length * 0.06,
+          state.interferenceEvents.length * 0.06 +
+          state.wells.length * 0.08,
       );
       const ambientGlow = context.createRadialGradient(
         size.width * 0.5,
@@ -2025,6 +2218,39 @@ export function EchoSurface({
         );
         context.stroke();
       }
+
+      state.wells.forEach((well) => {
+        const life = clamp(1 - (now - well.bornAt) / well.ttl, 0, 1);
+        well.energy = clamp(well.energy - delta * 0.00003, 0.26, 1.5);
+
+        if (now - well.lastPulseAt > 980 - well.energy * 180) {
+          well.lastPulseAt = now;
+          pushPulse(
+            well.point,
+            well.hue,
+            (0.16 + well.energy * 0.16) * (0.45 + life * 0.55),
+            well.symmetry,
+            "hold",
+          );
+          pushSpark(well.point, well.hue, 0.18 + well.energy * 0.12);
+        }
+
+        if (now - well.lastToneAt > 1600 - well.energy * 220) {
+          well.lastToneAt = now;
+          playTone(
+            well.hue,
+            (0.08 + well.energy * 0.08) * (0.4 + life * 0.6),
+            "hold",
+          );
+          triggerNoiseBurst(
+            well.hue,
+            (0.06 + well.energy * 0.04) * (0.4 + life * 0.6),
+            "hat",
+          );
+        }
+
+        drawResonanceWell(context, size, well, now);
+      });
 
       for (const touch of state.activeTouches.values()) {
         const holdAge = now - touch.bornAt;
@@ -2275,7 +2501,126 @@ export function EchoSurface({
           } => Boolean(value.point),
         );
 
+      for (let index = 0; index < state.wells.length; index += 1) {
+        const current = state.wells[index];
+
+        for (
+          let compareIndex = index + 1;
+          compareIndex < state.wells.length;
+          compareIndex += 1
+        ) {
+          const other = state.wells[compareIndex];
+          const gap = distance(current.point, other.point);
+
+          if (gap < 0.44) {
+            liveFilaments.push({
+              from: current.point,
+              to: other.point,
+              hue: mix(current.hue, other.hue, 0.5),
+              strength: clamp((0.44 - gap) * 0.56, 0.06, 0.2),
+            });
+          }
+        }
+      }
+
+      state.wells.forEach((well) => {
+        ghostSnapshots.forEach((ghost) => {
+          const gap = distance(well.point, ghost.point);
+
+          if (gap < 0.22) {
+            liveFilaments.push({
+              from: well.point,
+              to: ghost.point,
+              hue: mix(well.hue, ghost.hue, 0.5),
+              strength: clamp((0.22 - gap) * 2.2, 0.06, 0.34),
+            });
+
+            well.energy = clamp(
+              well.energy + (0.22 - gap) * 0.007,
+              0.26,
+              1.6,
+            );
+
+            if (gap < 0.06 && now - well.lastPulseAt > 220) {
+              well.lastPulseAt = now;
+              pushPulse(
+                {
+                  x: mix(well.point.x, ghost.point.x, 0.5),
+                  y: mix(well.point.y, ghost.point.y, 0.5),
+                  t: now,
+                },
+                mix(well.hue, ghost.hue, 0.5),
+                0.18 + well.energy * 0.14,
+                Math.max(well.symmetry, ghost.symmetry),
+                "ghost",
+              );
+
+              if (now - well.lastToneAt > 280) {
+                well.lastToneAt = now;
+                playTone(
+                  mix(well.hue, ghost.hue, 0.5),
+                  0.12 + well.energy * 0.08,
+                  "ghost",
+                );
+              }
+            }
+          }
+        });
+      });
+
       activePoints.forEach(({ touch, point }) => {
+        state.wells.forEach((well) => {
+          const gap = distance(point, well.point);
+
+          if (gap < 0.18) {
+            liveFilaments.push({
+              from: point,
+              to: well.point,
+              hue: mix(touch.hue, well.hue, 0.5),
+              strength: clamp((0.18 - gap) * 3, 0.08, 0.42),
+            });
+
+            well.energy = clamp(
+              well.energy + (0.18 - gap) * 0.012,
+              0.26,
+              1.6,
+            );
+
+            if (gap < 0.055 && now - well.lastPulseAt > 180) {
+              well.lastPulseAt = now;
+              pushPulse(
+                {
+                  x: mix(point.x, well.point.x, 0.5),
+                  y: mix(point.y, well.point.y, 0.5),
+                  t: now,
+                },
+                mix(touch.hue, well.hue, 0.5),
+                0.24 + well.energy * 0.14,
+                Math.max(touch.symmetry, well.symmetry),
+                "hold",
+              );
+              pushSpark(
+                {
+                  x: mix(point.x, well.point.x, 0.5),
+                  y: mix(point.y, well.point.y, 0.5),
+                  t: now,
+                },
+                mix(touch.hue, well.hue, 0.5),
+                0.26 + well.energy * 0.12,
+              );
+
+              if (now - well.lastToneAt > 240) {
+                well.lastToneAt = now;
+                playTone(
+                  mix(touch.hue, well.hue, 0.5),
+                  0.14 + well.energy * 0.08,
+                  "hold",
+                );
+              }
+            }
+          }
+        });
+
         ghostSnapshots.forEach((ghost) => {
           const copyCount = Math.max(ghost.symmetry, 1);
 
@@ -2472,6 +2817,7 @@ export function EchoSurface({
     simulationRef.current.pulses = [];
     simulationRef.current.sparks = [];
     simulationRef.current.interferenceEvents = [];
+    simulationRef.current.wells = [];
     interferenceCooldownRef.current.clear();
     lastInteractionAtRef.current = performance.now();
     syncActiveCount();
