@@ -1,0 +1,61 @@
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    ".dockerignore",
+    ".gitignore",
+    "Dockerfile",
+    "LICENSE",
+    "README.md",
+    "bootstrap.sh",
+    "docker-compose.yml",
+    "index.html",
+    "package-lock.json",
+    "package.json",
+    "tsconfig.json",
+    "tsconfig.node.json",
+    "vite.config.ts",
+])
+
+filegroup(
+    name = "project_sources",
+    srcs = [
+        "//public:guide_assets",
+        "//src:app_component",
+        "//src:app_entry_component",
+        "//src:styles_component",
+        "//src/components:echo_surface_component",
+        "//src/components:how_to_play_component",
+    ],
+)
+
+sh_binary(
+    name = "demo_dev",
+    srcs = ["tools/dev_server.sh"],
+    data = [":project_sources"],
+)
+
+sh_binary(
+    name = "demo_dist",
+    srcs = ["tools/build_demo.sh"],
+    data = [":project_sources"],
+)
+
+sh_binary(
+    name = "guide_screenshots",
+    srcs = ["tools/capture_guide.sh"],
+    data = [":project_sources"],
+)
+
+sh_binary(
+    name = "docker_up",
+    srcs = ["tools/docker_up.sh"],
+    data = [":project_sources"],
+)
+
+sh_binary(
+    name = "docker_down",
+    srcs = ["tools/docker_down.sh"],
+    data = [":project_sources"],
+)

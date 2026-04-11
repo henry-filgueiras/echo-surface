@@ -1,0 +1,11 @@
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "echo_surface_component",
+    srcs = ["EchoSurface.tsx"],
+)
+
+filegroup(
+    name = "how_to_play_component",
+    srcs = ["HowToPlay.tsx"],
+)

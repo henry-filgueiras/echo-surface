@@ -1,0 +1,16 @@
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "app_component",
+    srcs = ["App.tsx"],
+)
+
+filegroup(
+    name = "app_entry_component",
+    srcs = ["main.tsx"],
+)
+
+filegroup(
+    name = "styles_component",
+    srcs = ["styles.css"],
+)

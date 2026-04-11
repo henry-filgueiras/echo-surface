@@ -1,0 +1,5 @@
+.git
+.github
+bazel-*
+dist
+node_modules
