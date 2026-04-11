@@ -46,6 +46,10 @@ type EchoRecord = {
   memoryLifeMs: number;
   replayIntervalMs: number;
   synthetic: boolean;
+  scheduledAtMs: number;
+  loopSteps: number;
+  stepPoints: NormalizedPoint[];
+  lastQuantizedStep: number;
   lastEchoPulseAt: number;
   lastBoostAt: number;
 };
@@ -97,6 +101,19 @@ type InterferenceEvent = {
   symmetry: number;
 };
 
+type TimeSignature = {
+  label: string;
+  numerator: number;
+  denominator: number;
+};
+
+type TransportConfig = {
+  bpm: number;
+  quantizeMode: "nearest" | "next";
+  signature: TimeSignature;
+  stepsPerBeat: number;
+};
+
 type ResonanceWell = {
   id: number;
   bornAt: number;
@@ -106,6 +123,8 @@ type ResonanceWell = {
   symmetry: number;
   energy: number;
   drift: number;
+  scheduledAtMs: number;
+  lastQuantizedStep: number;
   lastPulseAt: number;
   lastToneAt: number;
 };
@@ -165,6 +184,18 @@ const MAX_ACTIVE_INTERFERENCE_EVENTS = 18;
 const MAX_INTERFERENCE_FRONTS = 18;
 const MAX_WELLS = 3;
 const WELL_TTL_MS = 18000;
+const TRANSPORT_SIGNATURES: TimeSignature[] = [
+  { label: "4/4", numerator: 4, denominator: 4 },
+  { label: "3/4", numerator: 3, denominator: 4 },
+  { label: "5/4", numerator: 5, denominator: 4 },
+  { label: "7/8", numerator: 7, denominator: 8 },
+];
+const DEFAULT_TRANSPORT_CONFIG: TransportConfig = {
+  bpm: 124,
+  quantizeMode: "next",
+  signature: TRANSPORT_SIGNATURES[0],
+  stepsPerBeat: 4,
+};
 
 export const isSurfacePreset = (value: string | null): value is SurfacePreset =>
   value !== null && SURFACE_PRESETS.includes(value as SurfacePreset);
@@ -187,6 +218,47 @@ const easeInOutSine = (value: number) =>
 
 const smoothPulse = (value: number) =>
   Math.sin(clamp(value, 0, 1) * Math.PI);
+
+const modulo = (value: number, divisor: number) =>
+  ((value % divisor) + divisor) % divisor;
+
+const getBeatMs = (transportConfig: TransportConfig) =>
+  (60000 / transportConfig.bpm) *
+  (4 / transportConfig.signature.denominator);
+
+const getStepMs = (transportConfig: TransportConfig) =>
+  getBeatMs(transportConfig) / transportConfig.stepsPerBeat;
+
+const getBarStepCount = (transportConfig: TransportConfig) =>
+  transportConfig.signature.numerator * transportConfig.stepsPerBeat;
+
+const getTransportStepPositionAtTime = (
+  timeMs: number,
+  transportConfig: TransportConfig,
+) => timeMs / getStepMs(transportConfig);
+
+const quantizeTimeMs = (
+  timeMs: number,
+  transportConfig: TransportConfig,
+  mode: TransportConfig["quantizeMode"] = transportConfig.quantizeMode,
+) => {
+  const stepMs = getStepMs(transportConfig);
+  const rawStep = timeMs / stepMs;
+  const snappedStep =
+    mode === "next" ? Math.ceil(rawStep) : Math.round(rawStep);
+
+  return Math.max(0, snappedStep) * stepMs;
+};
+
+const quantizeDurationToSteps = (
+  durationMs: number,
+  transportConfig: TransportConfig,
+) =>
+  clamp(
+    Math.ceil(durationMs / getStepMs(transportConfig)),
+    2,
+    64,
+  );
 
 const CLUB_SCALE = [0, 3, 5, 7, 10];
 
@@ -327,6 +399,64 @@ const samplePath = (points: NormalizedPoint[], targetTime: number) => {
   return {
     point: points[finalIndex],
     nextPoint: points[Math.max(finalIndex - 1, 0)],
+  };
+};
+
+const buildQuantizedStepPoints = (
+  points: NormalizedPoint[],
+  loopSteps: number,
+) => {
+  if (points.length === 0) {
+    return Array.from({ length: loopSteps }, () => ({
+      x: 0.5,
+      y: 0.5,
+      t: 0,
+    }));
+  }
+
+  const duration = Math.max(pathDuration(points), 260);
+
+  return Array.from({ length: loopSteps }, (_, stepIndex) => ({
+    ...samplePath(points, (duration * stepIndex) / loopSteps).point,
+    t: stepIndex,
+  }));
+};
+
+const sampleQuantizedLoop = (
+  stepPoints: NormalizedPoint[],
+  stepPosition: number,
+) => {
+  if (stepPoints.length === 0) {
+    return {
+      point: { x: 0.5, y: 0.5, t: 0 },
+      nextPoint: { x: 0.5, y: 0.5, t: 0 },
+      stepIndex: 0,
+    };
+  }
+
+  if (stepPoints.length === 1) {
+    return {
+      point: stepPoints[0],
+      nextPoint: stepPoints[0],
+      stepIndex: 0,
+    };
+  }
+
+  const wrappedStep = modulo(stepPosition, stepPoints.length);
+  const stepIndex = Math.floor(wrappedStep);
+  const nextStepIndex = (stepIndex + 1) % stepPoints.length;
+  const amount = wrappedStep - stepIndex;
+  const currentPoint = stepPoints[stepIndex];
+  const nextPoint = stepPoints[nextStepIndex];
+
+  return {
+    point: {
+      x: lerp(currentPoint.x, nextPoint.x, amount),
+      y: lerp(currentPoint.y, nextPoint.y, amount),
+      t: wrappedStep,
+    },
+    nextPoint,
+    stepIndex,
   };
 };
 
@@ -992,6 +1122,7 @@ const createEchoRecord = ({
   memoryLifeMs = ECHO_MEMORY_LIFE_MS,
   replayIntervalMs = 860,
   synthetic = false,
+  transportConfig = DEFAULT_TRANSPORT_CONFIG,
 }: {
   id: number;
   bornAt: number;
@@ -1011,30 +1142,40 @@ const createEchoRecord = ({
   memoryLifeMs?: number;
   replayIntervalMs?: number;
   synthetic?: boolean;
-}): EchoRecord => ({
-  id,
-  bornAt,
-  hue,
-  symmetry,
-  holdCharge,
-  duration: Math.max(pathDuration(points), 260),
-  points,
-  centroid: averagePoint(points),
-  delay,
-  speed,
-  phase,
-  resonance,
-  energy,
-  drift,
-  wobble,
-  lineWidth,
-  trailDecayMs,
-  memoryLifeMs,
-  replayIntervalMs,
-  synthetic,
-  lastEchoPulseAt: bornAt - 1200,
-  lastBoostAt: bornAt - 1200,
-});
+  transportConfig?: TransportConfig;
+}): EchoRecord => {
+  const duration = Math.max(pathDuration(points), 260);
+  const loopSteps = quantizeDurationToSteps(duration, transportConfig);
+
+  return {
+    id,
+    bornAt,
+    hue,
+    symmetry,
+    holdCharge,
+    duration,
+    points,
+    centroid: averagePoint(points),
+    delay,
+    speed,
+    phase,
+    resonance,
+    energy,
+    drift,
+    wobble,
+    lineWidth,
+    trailDecayMs,
+    memoryLifeMs,
+    replayIntervalMs,
+    synthetic,
+    scheduledAtMs: quantizeTimeMs(bornAt, transportConfig),
+    loopSteps,
+    stepPoints: buildQuantizedStepPoints(points, loopSteps),
+    lastQuantizedStep: -1,
+    lastEchoPulseAt: bornAt - 1200,
+    lastBoostAt: bornAt - 1200,
+  };
+};
 
 const createWellRecord = ({
   id,
@@ -1045,6 +1186,7 @@ const createWellRecord = ({
   energy,
   drift,
   ttl = WELL_TTL_MS,
+  transportConfig = DEFAULT_TRANSPORT_CONFIG,
 }: {
   id: number;
   bornAt: number;
@@ -1054,6 +1196,7 @@ const createWellRecord = ({
   energy: number;
   drift: number;
   ttl?: number;
+  transportConfig?: TransportConfig;
 }): ResonanceWell => ({
   id,
   bornAt,
@@ -1063,9 +1206,36 @@ const createWellRecord = ({
   symmetry,
   energy,
   drift,
+  scheduledAtMs: quantizeTimeMs(bornAt, transportConfig),
+  lastQuantizedStep: -1,
   lastPulseAt: bornAt - 900,
   lastToneAt: bornAt - 1200,
 });
+
+const requantizeEchoRecord = (
+  echo: EchoRecord,
+  transportConfig: TransportConfig,
+  resetStep = true,
+) => {
+  const loopSteps = quantizeDurationToSteps(echo.duration, transportConfig);
+  echo.scheduledAtMs = quantizeTimeMs(echo.bornAt, transportConfig);
+  echo.loopSteps = loopSteps;
+  echo.stepPoints = buildQuantizedStepPoints(echo.points, loopSteps);
+  if (resetStep) {
+    echo.lastQuantizedStep = -1;
+  }
+};
+
+const requantizeWellRecord = (
+  well: ResonanceWell,
+  transportConfig: TransportConfig,
+  resetStep = true,
+) => {
+  well.scheduledAtMs = quantizeTimeMs(well.bornAt, transportConfig);
+  if (resetStep) {
+    well.lastQuantizedStep = -1;
+  }
+};
 
 const createPresetState = (preset: SurfacePreset, now: number) => {
   const activeTouches = new Map<number, ActiveTouch>();
@@ -1427,6 +1597,7 @@ const createPresetState = (preset: SurfacePreset, now: number) => {
           symmetry: 6,
           energy: 0.82,
           drift: 1.6,
+          transportConfig: DEFAULT_TRANSPORT_CONFIG,
         }),
       ],
       interactions: echoes.length,
@@ -1481,7 +1652,15 @@ export function EchoSurface({
   const [isMuted, setIsMuted] = useState(false);
   const [demoAwake, setDemoAwake] = useState(false);
   const [symmetryMode, setSymmetryMode] = useState<SymmetryMode>("auto");
+  const [transportSignatureIndex, setTransportSignatureIndex] = useState(0);
   const [lastResolvedSymmetry, setLastResolvedSymmetry] = useState(1);
+  const transportConfig = useMemo(
+    () => ({
+      ...DEFAULT_TRANSPORT_CONFIG,
+      signature: TRANSPORT_SIGNATURES[transportSignatureIndex],
+    }),
+    [transportSignatureIndex],
+  );
 
   const symmetryDisplay = useMemo(
     () => formatSymmetryMode(symmetryMode, lastResolvedSymmetry),
@@ -1489,6 +1668,7 @@ export function EchoSurface({
   );
   const decayLabel = `${(ECHO_TRAIL_DECAY_MS / 1000).toFixed(1)}s`;
   const replayLabel = demoAwake ? "DEMO" : LOOP_ENABLED ? "ON" : "OFF";
+  const timeLabel = `${transportConfig.signature.label} @${transportConfig.bpm}`;
   const whisperLabel = demoAwake
     ? "the surface is replaying its own memory"
     : activeCount > 0
@@ -1535,6 +1715,14 @@ export function EchoSurface({
     });
 
     lastInteractionAtRef.current = now;
+    syncDemoState(false);
+  };
+
+  const cycleTimeSignature = () => {
+    setTransportSignatureIndex(
+      (current) => (current + 1) % TRANSPORT_SIGNATURES.length,
+    );
+    lastInteractionAtRef.current = performance.now();
     syncDemoState(false);
   };
 
@@ -1919,6 +2107,8 @@ export function EchoSurface({
       existing.hue = mix(existing.hue, hue, 0.55);
       existing.energy = clamp(existing.energy + energy * 0.3, 0.3, 1.6);
       existing.symmetry = Math.max(existing.symmetry, symmetry);
+      existing.scheduledAtMs = quantizeTimeMs(now, transportConfig);
+      existing.lastQuantizedStep = -1;
       existing.lastPulseAt = now - 260;
       return;
     }
@@ -1933,6 +2123,7 @@ export function EchoSurface({
         symmetry,
         energy: clamp(energy, 0.42, 1.2),
         drift: Math.random() * TAU,
+        transportConfig,
       }),
     ].slice(-MAX_WELLS);
   };
@@ -1974,6 +2165,7 @@ export function EchoSurface({
           lineWidth: 2,
           synthetic: true,
           replayIntervalMs: 960,
+          transportConfig,
         }),
       ].slice(-MAX_ECHOES);
       pushPulse(averagePoint(gesture), hue, 0.32, symmetry, "ghost");
@@ -1986,8 +2178,13 @@ export function EchoSurface({
     const echo = state.echoes[demoCursorRef.current % state.echoes.length];
     demoCursorRef.current += 1;
     echo.resonance = clamp(echo.resonance + 0.24, 0.08, 1.5);
-    echo.phase = (echo.phase + echo.duration * 0.18) % echo.duration;
-    const sample = samplePath(echo.points, echo.phase);
+    const loopProgressSteps =
+      getTransportStepPositionAtTime(now, transportConfig) -
+      getTransportStepPositionAtTime(echo.scheduledAtMs, transportConfig);
+    const sample = sampleQuantizedLoop(
+      echo.stepPoints,
+      Math.max(0, loopProgressSteps),
+    );
     pushPulse(sample.point, echo.hue, 0.36 + echo.resonance * 0.1, echo.symmetry, "ghost");
     pushSpark(sample.point, echo.hue, 0.34);
 
@@ -2030,15 +2227,13 @@ export function EchoSurface({
 
     simulationRef.current.echoes = [
       ...simulationRef.current.echoes,
-      {
+      createEchoRecord({
         id: echoIdRef.current++,
         bornAt: now,
         hue: touch.hue,
         symmetry,
         holdCharge,
-        duration,
         points,
-        centroid,
         delay: 520 + Math.random() * 1200,
         speed: 0.76 + Math.random() * 0.56 + holdCharge * 0.18,
         phase: Math.random() * duration,
@@ -2051,9 +2246,8 @@ export function EchoSurface({
         memoryLifeMs: ECHO_MEMORY_LIFE_MS,
         replayIntervalMs: 720 + Math.random() * 460,
         synthetic: false,
-        lastEchoPulseAt: 0,
-        lastBoostAt: 0,
-      },
+        transportConfig,
+      }),
     ].slice(-MAX_ECHOES);
 
     simulationRef.current.interactions += 1;
@@ -2107,6 +2301,15 @@ export function EchoSurface({
   }, [symmetryMode]);
 
   useEffect(() => {
+    simulationRef.current.echoes.forEach((echo) =>
+      requantizeEchoRecord(echo, transportConfig),
+    );
+    simulationRef.current.wells.forEach((well) =>
+      requantizeWellRecord(well, transportConfig),
+    );
+  }, [transportConfig]);
+
+  useEffect(() => {
     const canvas = canvasRef.current;
     const surface = surfaceRef.current;
 
@@ -2148,6 +2351,12 @@ export function EchoSurface({
       const state = simulationRef.current;
       const liveFilaments: Filament[] = [];
       const ghostSnapshots: GhostSnapshot[] = [];
+      const transportStepPosition = getTransportStepPositionAtTime(
+        now,
+        transportConfig,
+      );
+      const currentTransportStep = Math.floor(transportStepPosition);
+      const barStepCount = getBarStepCount(transportConfig);
       const idleForMs = now - lastInteractionAtRef.current;
       const demoModeActive =
         idleForMs > IDLE_DEMO_AFTER_MS && state.activeTouches.size === 0;
@@ -2223,28 +2432,37 @@ export function EchoSurface({
         const life = clamp(1 - (now - well.bornAt) / well.ttl, 0, 1);
         well.energy = clamp(well.energy - delta * 0.00003, 0.26, 1.5);
 
-        if (now - well.lastPulseAt > 980 - well.energy * 180) {
-          well.lastPulseAt = now;
+        const scheduledStep = Math.floor(
+          getTransportStepPositionAtTime(well.scheduledAtMs, transportConfig),
+        );
+        const relativeStep = currentTransportStep - scheduledStep;
+        const isBeatStep =
+          relativeStep >= 0 &&
+          relativeStep % transportConfig.stepsPerBeat === 0 &&
+          currentTransportStep !== well.lastQuantizedStep;
+
+        if (isBeatStep) {
+          well.lastQuantizedStep = currentTransportStep;
+          const accent = relativeStep % barStepCount === 0 ? 1 : 0.72;
+
           pushPulse(
             well.point,
             well.hue,
-            (0.16 + well.energy * 0.16) * (0.45 + life * 0.55),
+            (0.14 + well.energy * 0.14) *
+              (0.45 + life * 0.55) *
+              accent,
             well.symmetry,
             "hold",
           );
-          pushSpark(well.point, well.hue, 0.18 + well.energy * 0.12);
-        }
-
-        if (now - well.lastToneAt > 1600 - well.energy * 220) {
-          well.lastToneAt = now;
+          pushSpark(well.point, well.hue, 0.16 + well.energy * 0.1 * accent);
           playTone(
             well.hue,
-            (0.08 + well.energy * 0.08) * (0.4 + life * 0.6),
+            (0.08 + well.energy * 0.06) * (0.4 + life * 0.6) * accent,
             "hold",
           );
           triggerNoiseBurst(
             well.hue,
-            (0.06 + well.energy * 0.04) * (0.4 + life * 0.6),
+            (0.05 + well.energy * 0.03) * (0.4 + life * 0.6) * accent,
             "hat",
           );
         }
@@ -2287,10 +2505,15 @@ export function EchoSurface({
         const trailFade = clamp(1 - age / echo.trailDecayMs, 0, 1);
         const memoryFade = clamp(1 - age / echo.memoryLifeMs, 0, 1);
         echo.resonance = Math.max(0.08 * memoryFade, echo.resonance - delta * 0.00009);
-
-        const activeAge = now - echo.bornAt - echo.delay;
-        const pathTime = activeAge <= 0 ? 0 : ((activeAge * echo.speed + echo.phase) % echo.duration);
-        const sample = samplePath(echo.points, pathTime);
+        const scheduledStepPosition = getTransportStepPositionAtTime(
+          echo.scheduledAtMs,
+          transportConfig,
+        );
+        const loopProgressSteps = transportStepPosition - scheduledStepPosition;
+        const sample = sampleQuantizedLoop(
+          echo.stepPoints,
+          Math.max(0, loopProgressSteps),
+        );
         const shimmer = 0.4 + Math.sin(now * 0.0012 + echo.drift) * 0.2;
         const wobbleAmount = echo.wobble * (0.6 + echo.resonance);
 
@@ -2349,7 +2572,7 @@ export function EchoSurface({
           );
         }
 
-        if (activeAge > 0 && memoryFade > 0.02) {
+        if (loopProgressSteps >= 0 && memoryFade > 0.02) {
           const ghost = {
             echoId: echo.id,
             point: ghostPoint,
@@ -2367,33 +2590,40 @@ export function EchoSurface({
           ghostSnapshots.push(ghost);
           drawGhostNode(context, size, ghost, now);
 
-          if (
-            LOOP_ENABLED &&
-            now - echo.lastEchoPulseAt >
-              echo.replayIntervalMs - echo.energy * 90
-          ) {
-            echo.lastEchoPulseAt = now;
+          const relativeLoopStep =
+            currentTransportStep - Math.floor(scheduledStepPosition);
+          const isBeatStep =
+            relativeLoopStep >= 0 &&
+            currentTransportStep !== echo.lastQuantizedStep &&
+            relativeLoopStep % transportConfig.stepsPerBeat === 0;
+
+          if (LOOP_ENABLED && isBeatStep) {
+            echo.lastQuantizedStep = currentTransportStep;
+            const accent = relativeLoopStep % barStepCount === 0 ? 1 : 0.72;
+
             pushPulse(
               ghostPoint,
               echo.hue,
-              (0.16 + echo.energy * 0.18 + echo.resonance * 0.14) *
-                (0.3 + memoryFade * 0.7),
+              (0.16 + echo.energy * 0.16 + echo.resonance * 0.12) *
+                (0.3 + memoryFade * 0.7) *
+                accent,
               echo.symmetry,
               "ghost",
             );
-            if (now - lastGhostToneAtRef.current > 180) {
-              lastGhostToneAtRef.current = now;
-              playTone(
-                echo.hue,
-                (0.12 + echo.resonance * 0.1) * (0.4 + memoryFade * 0.6),
-                "ghost",
-              );
-              triggerNoiseBurst(
-                echo.hue,
-                (0.12 + echo.resonance * 0.08) * (0.3 + memoryFade * 0.7),
-                "hat",
-              );
-            }
+            playTone(
+              echo.hue,
+              (0.1 + echo.resonance * 0.08) *
+                (0.4 + memoryFade * 0.6) *
+                accent,
+              "ghost",
+            );
+            triggerNoiseBurst(
+              echo.hue,
+              (0.08 + echo.resonance * 0.05) *
+                (0.3 + memoryFade * 0.7) *
+                accent,
+              "hat",
+            );
           }
         }
       });
@@ -2700,7 +2930,7 @@ export function EchoSurface({
         window.cancelAnimationFrame(animationFrameRef.current);
       }
     };
-  }, []);
+  }, [transportConfig]);
 
   useEffect(() => {
     return () => {
@@ -2877,6 +3107,7 @@ export function EchoSurface({
 
             <div className="surface-cockpit__readout">
               <p>ECHO x{memory.length}</p>
+              <p>TIME {timeLabel}</p>
               <p>DECAY {decayLabel}</p>
               <p>LOOP {replayLabel}</p>
               <p>SYM {symmetryDisplay}</p>
@@ -2894,6 +3125,13 @@ export function EchoSurface({
               onPointerMove={stopSurfaceGesture}
               onPointerUp={stopSurfaceGesture}
             >
+              <button
+                className="surface-tool"
+                type="button"
+                onClick={cycleTimeSignature}
+              >
+                {transportConfig.signature.label}
+              </button>
               <button
                 className="surface-tool"
                 type="button"
