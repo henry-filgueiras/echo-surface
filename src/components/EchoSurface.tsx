@@ -114,6 +114,33 @@ type TransportConfig = {
   stepsPerBeat: number;
 };
 
+type GestureEvent = {
+  id: number;
+  type: "tap" | "drag" | "hold";
+  points: NormalizedPoint[];
+  timestamp: number;
+  duration: number;
+  energy: number;
+  hue: number;
+  symmetry: number;
+  centroid: NormalizedPoint;
+  travel: number;
+};
+
+type MotifLane = {
+  id: number;
+  bornAt: number;
+  lastSeenAt: number;
+  hue: number;
+  symmetry: number;
+  strength: number;
+  occurrences: number;
+  points: NormalizedPoint[];
+  centroid: NormalizedPoint;
+  drift: number;
+  sourceType: "drag" | "hold";
+};
+
 type ResonanceWell = {
   id: number;
   bornAt: number;
@@ -160,6 +187,9 @@ type SimulationState = {
   sparks: Spark[];
   interferenceEvents: InterferenceEvent[];
   wells: ResonanceWell[];
+  gestureLog: GestureEvent[];
+  motifs: MotifLane[];
+  surfaceEnergy: number;
   interactions: number;
 };
 
@@ -176,13 +206,16 @@ const SYMMETRY_MODE_SEQUENCE: SymmetryMode[] = ["auto", 2, 4, 6];
 const LOOP_ENABLED = true;
 const ECHO_TRAIL_DECAY_MS = 2400;
 const ECHO_MEMORY_LIFE_MS = 14000;
-const IDLE_DEMO_AFTER_MS = 11000;
+const IDLE_DEMO_AFTER_MS = 9000;
 const DEMO_INTERVAL_MS = 2800;
 const MAX_ACTIVE_PULSES = 32;
 const MAX_ACTIVE_SPARKS = 48;
 const MAX_ACTIVE_INTERFERENCE_EVENTS = 18;
 const MAX_INTERFERENCE_FRONTS = 18;
 const MAX_WELLS = 3;
+const MAX_GESTURE_EVENTS = 48;
+const MAX_MOTIFS = 4;
+const MOTIF_POINT_COUNT = 18;
 const WELL_TTL_MS = 18000;
 const TRANSPORT_SIGNATURES: TimeSignature[] = [
   { label: "4/4", numerator: 4, denominator: 4 },
@@ -458,6 +491,101 @@ const sampleQuantizedLoop = (
     nextPoint,
     stepIndex,
   };
+};
+
+const resampleGesturePoints = (
+  points: NormalizedPoint[],
+  count: number,
+) => {
+  if (points.length === 0) {
+    return Array.from({ length: count }, () => ({
+      x: 0.5,
+      y: 0.5,
+      t: 0,
+    }));
+  }
+
+  if (points.length === 1) {
+    return Array.from({ length: count }, (_, index) => ({
+      ...points[0],
+      t: index,
+    }));
+  }
+
+  const duration = Math.max(pathDuration(points), count - 1);
+
+  return Array.from({ length: count }, (_, index) => ({
+    ...samplePath(points, (duration * index) / Math.max(count - 1, 1)).point,
+    t: index,
+  }));
+};
+
+const normalizeGesturePoints = (points: NormalizedPoint[]) => {
+  const centroid = averagePoint(points);
+  const scale =
+    Math.max(
+      0.02,
+      ...points.map((point) => Math.hypot(point.x - centroid.x, point.y - centroid.y)),
+    ) || 0.02;
+
+  return points.map((point) => ({
+    x: (point.x - centroid.x) / scale,
+    y: (point.y - centroid.y) / scale,
+    t: point.t,
+  }));
+};
+
+const compareGestureShapes = (
+  first: NormalizedPoint[],
+  second: NormalizedPoint[],
+) =>
+  first.reduce(
+    (total, point, index) =>
+      total +
+      Math.hypot(point.x - second[index].x, point.y - second[index].y),
+    0,
+  ) / Math.max(first.length, 1);
+
+const blendGestureShapes = (
+  first: NormalizedPoint[],
+  second: NormalizedPoint[],
+  amount: number,
+) =>
+  first.map((point, index) => ({
+    x: mix(point.x, second[index].x, amount),
+    y: mix(point.y, second[index].y, amount),
+    t: index,
+  }));
+
+const getGestureTravel = (points: NormalizedPoint[]) =>
+  points.slice(1).reduce(
+    (total, point, index) => total + distance(points[index], point),
+    0,
+  );
+
+const getGestureDirection = (points: NormalizedPoint[]) => {
+  if (points.length < 2) {
+    return 0;
+  }
+
+  const start = points[0];
+  const end = points.at(-1) ?? start;
+
+  return Math.atan2(end.y - start.y, end.x - start.x);
+};
+
+const getMotifMotionPoints = (
+  motif: MotifLane,
+  transportStepPosition: number,
+  energy: number,
+) => {
+  const speed = 0.32 + energy * 0.44;
+  const sample = sampleQuantizedLoop(
+    motif.points,
+    transportStepPosition * speed + motif.drift * motif.points.length,
+  );
+
+  return sample;
 };
 
 const point = (x: number, y: number, t: number): NormalizedPoint => ({
@@ -989,6 +1117,84 @@ const drawMemoryBloom = (
   context.restore();
 };
 
+const drawMotifLane = (
+  context: CanvasRenderingContext2D,
+  size: SurfaceSize,
+  motif: MotifLane,
+  now: number,
+  surfaceEnergy: number,
+  transportStepPosition: number,
+) => {
+  const age = now - motif.lastSeenAt;
+  const life = clamp(1 - age / 32000, 0, 1);
+  const strength = motif.strength * (0.35 + life * 0.65);
+
+  if (strength < 0.06) {
+    return;
+  }
+
+  context.save();
+  context.shadowBlur = 14 + strength * 18;
+  context.shadowColor = `hsla(${motif.hue}, 92%, 72%, ${0.12 + strength * 0.18})`;
+  drawPath(
+    context,
+    size,
+    motif.points,
+    motif.symmetry,
+    `hsla(${motif.hue}, 88%, 72%, ${0.06 + strength * 0.18})`,
+    4.4 + strength * 5.2,
+    0.58,
+  );
+  context.restore();
+
+  drawPath(
+    context,
+    size,
+    motif.points,
+    motif.symmetry,
+    `hsla(${motif.hue}, 92%, 80%, ${0.12 + strength * 0.2})`,
+    1.2 + strength * 1.8,
+    0.9,
+  );
+
+  const motifPulse = getMotifMotionPoints(motif, transportStepPosition, surfaceEnergy);
+  const copyCount = Math.max(motif.symmetry, 1);
+
+  context.save();
+  context.globalCompositeOperation = "lighter";
+
+  for (let copyIndex = 0; copyIndex < copyCount; copyIndex += 1) {
+    const angle = (copyIndex / copyCount) * TAU;
+    const rotated = rotatePoint(motifPulse.point, angle);
+    const pixel = normalizedToPixels(rotated, size);
+    const gradient = context.createRadialGradient(
+      pixel.x,
+      pixel.y,
+      0,
+      pixel.x,
+      pixel.y,
+      26 + strength * 20,
+    );
+
+    gradient.addColorStop(
+      0,
+      `hsla(${motif.hue}, 100%, 84%, ${0.22 + strength * 0.2})`,
+    );
+    gradient.addColorStop(
+      0.45,
+      `hsla(${motif.hue}, 92%, 70%, ${0.08 + strength * 0.08})`,
+    );
+    gradient.addColorStop(1, `hsla(${motif.hue}, 88%, 62%, 0)`);
+
+    context.fillStyle = gradient;
+    context.beginPath();
+    context.arc(pixel.x, pixel.y, 24 + strength * 18, 0, TAU);
+    context.fill();
+  }
+
+  context.restore();
+};
+
 const drawResonanceWell = (
   context: CanvasRenderingContext2D,
   size: SurfaceSize,
@@ -1242,6 +1448,7 @@ const createPresetState = (preset: SurfacePreset, now: number) => {
   let nextEchoId = 0;
   let nextPulseId = 0;
   let nextWellId = 0;
+  let nextMotifId = 0;
 
   if (preset === "seed") {
     const echoes = [
@@ -1354,6 +1561,32 @@ const createPresetState = (preset: SurfacePreset, now: number) => {
         sparks: [],
         interferenceEvents: [],
         wells: [],
+        gestureLog: [],
+        motifs: [
+          {
+            id: nextMotifId++,
+            bornAt: now - 3200,
+            lastSeenAt: now - 600,
+            hue: 42,
+            symmetry: 3,
+            strength: 0.72,
+            occurrences: 2,
+            points: resampleGesturePoints(
+              [
+                point(0.25, 0.34, 0),
+                point(0.33, 0.3, 1),
+                point(0.39, 0.33, 2),
+                point(0.36, 0.41, 3),
+                point(0.28, 0.4, 4),
+              ],
+              MOTIF_POINT_COUNT,
+            ),
+            centroid: point(0.32, 0.36, 0),
+            drift: 0.28,
+            sourceType: "drag" as const,
+          },
+        ],
+        surfaceEnergy: 0.22,
         interactions: echoes.length,
       },
       nextEchoId,
@@ -1475,6 +1708,54 @@ const createPresetState = (preset: SurfacePreset, now: number) => {
         sparks,
         interferenceEvents: [],
         wells: [],
+        gestureLog: [],
+        motifs: [
+          {
+            id: nextMotifId++,
+            bornAt: now - 3600,
+            lastSeenAt: now - 400,
+            hue: 166,
+            symmetry: 4,
+            strength: 0.84,
+            occurrences: 3,
+            points: resampleGesturePoints(
+              [
+                point(0.2, 0.64, 0),
+                point(0.33, 0.55, 1),
+                point(0.49, 0.44, 2),
+                point(0.64, 0.46, 3),
+                point(0.76, 0.59, 4),
+              ],
+              MOTIF_POINT_COUNT,
+            ),
+            centroid: point(0.48, 0.54, 0),
+            drift: 1.2,
+            sourceType: "drag" as const,
+          },
+          {
+            id: nextMotifId++,
+            bornAt: now - 3000,
+            lastSeenAt: now - 700,
+            hue: 34,
+            symmetry: 5,
+            strength: 0.66,
+            occurrences: 2,
+            points: resampleGesturePoints(
+              [
+                point(0.22, 0.31, 0),
+                point(0.35, 0.41, 1),
+                point(0.49, 0.56, 2),
+                point(0.62, 0.66, 3),
+                point(0.78, 0.67, 4),
+              ],
+              MOTIF_POINT_COUNT,
+            ),
+            centroid: point(0.49, 0.52, 0),
+            drift: 2.1,
+            sourceType: "drag" as const,
+          },
+        ],
+        surfaceEnergy: 0.3,
         interactions: echoes.length,
       },
       nextEchoId,
@@ -1600,6 +1881,34 @@ const createPresetState = (preset: SurfacePreset, now: number) => {
           transportConfig: DEFAULT_TRANSPORT_CONFIG,
         }),
       ],
+      gestureLog: [],
+      motifs: [
+        {
+          id: nextMotifId++,
+          bornAt: now - 2800,
+          lastSeenAt: now - 280,
+          hue: 132,
+          symmetry: 6,
+          strength: 0.92,
+          occurrences: 3,
+          points: resampleGesturePoints(
+            [
+              point(0.44, 0.49, 0),
+              point(0.48, 0.43, 1),
+              point(0.56, 0.43, 2),
+              point(0.61, 0.5, 3),
+              point(0.56, 0.57, 4),
+              point(0.48, 0.57, 5),
+              point(0.44, 0.49, 6),
+            ],
+            MOTIF_POINT_COUNT,
+          ),
+          centroid: point(0.51, 0.5, 0),
+          drift: 0.74,
+          sourceType: "hold" as const,
+        },
+      ],
+      surfaceEnergy: 0.42,
       interactions: echoes.length,
     },
     nextEchoId,
@@ -1631,6 +1940,8 @@ export function EchoSurface({
   const pulseIdRef = useRef(0);
   const echoIdRef = useRef(0);
   const wellIdRef = useRef(0);
+  const gestureEventIdRef = useRef(0);
+  const motifIdRef = useRef(0);
   const interferenceIdRef = useRef(0);
   const lastInteractionAtRef = useRef(performance.now());
   const lastDemoAtRef = useRef(0);
@@ -1645,6 +1956,9 @@ export function EchoSurface({
     sparks: [],
     interferenceEvents: [],
     wells: [],
+    gestureLog: [],
+    motifs: [],
+    surfaceEnergy: 0.18,
     interactions: 0,
   });
   const [memory, setMemory] = useState<MemoryChip[]>([]);
@@ -1687,6 +2001,204 @@ export function EchoSurface({
 
   const syncActiveCount = () => {
     setActiveCount(simulationRef.current.activeTouches.size);
+  };
+
+  const classifyGestureEvent = (
+    travel: number,
+    holdCharge: number,
+    points: NormalizedPoint[],
+  ): GestureEvent["type"] => {
+    if (holdCharge > 0.44 && points.length > 2) {
+      return "hold";
+    }
+
+    if (travel > 0.08 || points.length > 5) {
+      return "drag";
+    }
+
+    return "tap";
+  };
+
+  const learnMotifFromEvent = (event: GestureEvent) => {
+    if (event.type === "tap" || event.points.length < 4) {
+      return;
+    }
+
+    const state = simulationRef.current;
+    const resampled = resampleGesturePoints(event.points, MOTIF_POINT_COUNT);
+    const normalized = normalizeGesturePoints(resampled);
+    const direction = getGestureDirection(normalized);
+    const matchThreshold = event.type === "hold" ? 0.28 : 0.24;
+    let bestMatch:
+      | {
+          score: number;
+          motif: MotifLane;
+        }
+      | undefined;
+
+    state.motifs.forEach((motif) => {
+      const motifNormalized = normalizeGesturePoints(motif.points);
+      const shapeScore = compareGestureShapes(normalized, motifNormalized);
+      const directionScore = Math.abs(
+        Math.atan2(
+          Math.sin(direction - getGestureDirection(motifNormalized)),
+          Math.cos(direction - getGestureDirection(motifNormalized)),
+        ),
+      );
+      const centroidScore = distance(event.centroid, motif.centroid);
+      const totalScore = shapeScore + directionScore * 0.12 + centroidScore * 0.34;
+
+      if (
+        totalScore < matchThreshold &&
+        (!bestMatch || totalScore < bestMatch.score)
+      ) {
+        bestMatch = { motif, score: totalScore };
+      }
+    });
+
+    if (bestMatch) {
+      const { motif } = bestMatch;
+      motif.points = blendGestureShapes(motif.points, resampled, 0.28);
+      motif.centroid = averagePoint(motif.points);
+      motif.hue = mix(motif.hue, event.hue, 0.28);
+      motif.symmetry = Math.max(motif.symmetry, event.symmetry);
+      motif.strength = clamp(motif.strength + 0.16, 0.24, 1.5);
+      motif.lastSeenAt = event.timestamp;
+      motif.occurrences += 1;
+      return;
+    }
+
+    const previousMatch = [...state.gestureLog]
+      .reverse()
+      .find((priorEvent) => {
+        if (
+          priorEvent.id === event.id ||
+          priorEvent.type !== event.type ||
+          priorEvent.points.length < 4
+        ) {
+          return false;
+        }
+
+        const priorResampled = resampleGesturePoints(
+          priorEvent.points,
+          MOTIF_POINT_COUNT,
+        );
+        const priorNormalized = normalizeGesturePoints(priorResampled);
+        const shapeScore = compareGestureShapes(normalized, priorNormalized);
+        const directionScore = Math.abs(
+          Math.atan2(
+            Math.sin(direction - getGestureDirection(priorNormalized)),
+            Math.cos(direction - getGestureDirection(priorNormalized)),
+          ),
+        );
+
+        return (
+          shapeScore + directionScore * 0.12 < matchThreshold &&
+          distance(event.centroid, priorEvent.centroid) < 0.34
+        );
+      });
+
+    if (!previousMatch || state.motifs.length >= MAX_MOTIFS) {
+      return;
+    }
+
+    const priorResampled = resampleGesturePoints(
+      previousMatch.points,
+      MOTIF_POINT_COUNT,
+    );
+    const motifPoints = blendGestureShapes(priorResampled, resampled, 0.5);
+
+    state.motifs = [
+      ...state.motifs,
+      {
+        id: motifIdRef.current++,
+        bornAt: event.timestamp,
+        lastSeenAt: event.timestamp,
+        hue: mix(previousMatch.hue, event.hue, 0.5),
+        symmetry: Math.max(previousMatch.symmetry, event.symmetry),
+        strength: 0.56,
+        occurrences: 2,
+        points: motifPoints,
+        centroid: averagePoint(motifPoints),
+        drift: Math.random() * TAU,
+        sourceType: event.type,
+      },
+    ].slice(-MAX_MOTIFS);
+  };
+
+  const appendGestureEvent = (event: GestureEvent) => {
+    const state = simulationRef.current;
+    state.gestureLog = [...state.gestureLog, event].slice(-MAX_GESTURE_EVENTS);
+    state.surfaceEnergy = clamp(
+      state.surfaceEnergy +
+        event.energy *
+          (event.type === "tap" ? 0.08 : event.type === "hold" ? 0.18 : 0.14),
+      0.12,
+      1.5,
+    );
+    learnMotifFromEvent(event);
+  };
+
+  const remixGestureEventPoints = (event: GestureEvent, remixIndex: number) => {
+    const centroid = event.centroid;
+    const points = event.points.map((point) => ({ ...point }));
+    const variant = remixIndex % 4;
+
+    return points.map((point, pointIndex) => {
+      const dx = point.x - centroid.x;
+      const dy = point.y - centroid.y;
+      const baseTime = pointIndex === 0 ? 0 : point.t;
+
+      if (variant === 0) {
+        return {
+          x: clamp(point.x, 0.04, 0.96),
+          y: clamp(point.y, 0.04, 0.96),
+          t: baseTime * 1.2,
+        };
+      }
+
+      if (variant === 1) {
+        return {
+          x: clamp(centroid.x - dx * 0.94, 0.04, 0.96),
+          y: clamp(centroid.y + dy * 0.94, 0.04, 0.96),
+          t: baseTime * 1.1,
+        };
+      }
+
+      if (variant === 2) {
+        const rotated = {
+          x:
+            centroid.x +
+            dx * Math.cos(Math.PI / 8) -
+            dy * Math.sin(Math.PI / 8),
+          y:
+            centroid.y +
+            dx * Math.sin(Math.PI / 8) +
+            dy * Math.cos(Math.PI / 8),
+        };
+
+        return {
+          x: clamp(rotated.x, 0.04, 0.96),
+          y: clamp(rotated.y, 0.04, 0.96),
+          t: baseTime * 1.28,
+        };
+      }
+
+      const radial = rotatePoint(
+        {
+          x: clamp(0.5 + (point.x - 0.5) * 0.92, 0.04, 0.96),
+          y: clamp(0.5 + (point.y - 0.5) * 0.92, 0.04, 0.96),
+          t: baseTime,
+        },
+        (Math.PI / Math.max(event.symmetry, 2)) * 0.5,
+      );
+
+      return {
+        x: clamp(radial.x, 0.04, 0.96),
+        y: clamp(radial.y, 0.04, 0.96),
+        t: baseTime * 1.36,
+      };
+    });
   };
 
   const resolveSymmetry = (point: NormalizedPoint) => {
@@ -2019,6 +2531,9 @@ export function EchoSurface({
   };
 
   const pushPulse = (point: NormalizedPoint, hue: number, strength: number, symmetry: number, source: Pulse["source"]) => {
+    const energyScale =
+      0.9 + simulationRef.current.surfaceEnergy * (source === "touch" ? 0.22 : 0.14);
+
     simulationRef.current.pulses.push({
       id: pulseIdRef.current++,
       bornAt: performance.now(),
@@ -2032,7 +2547,7 @@ export function EchoSurface({
               : 1500,
       point,
       hue,
-      strength: clamp(strength, 0.18, 1.7),
+      strength: clamp(strength * energyScale, 0.18, 1.9),
       symmetry,
       source,
     });
@@ -2139,6 +2654,68 @@ export function EchoSurface({
 
   const wakeSurfaceMemory = (now: number) => {
     const state = simulationRef.current;
+    const recentEvent =
+      state.gestureLog.length > 0
+        ? state.gestureLog[
+            state.gestureLog.length -
+              1 -
+              (demoCursorRef.current % state.gestureLog.length)
+          ]
+        : undefined;
+
+    if (recentEvent) {
+      const remixedPoints = remixGestureEventPoints(recentEvent, demoCursorRef.current);
+      const centroid = averagePoint(remixedPoints);
+      const motifBoost = state.motifs.find(
+        (motif) => distance(motif.centroid, recentEvent.centroid) < 0.22,
+      );
+
+      demoCursorRef.current += 1;
+      state.echoes = [
+        ...state.echoes,
+        createEchoRecord({
+          id: echoIdRef.current++,
+          bornAt: now - 120,
+          hue: motifBoost ? mix(recentEvent.hue, motifBoost.hue, 0.32) : recentEvent.hue,
+          symmetry: Math.max(recentEvent.symmetry, motifBoost?.symmetry ?? 1),
+          holdCharge: recentEvent.type === "hold" ? 0.24 : 0.14,
+          points: remixedPoints,
+          delay: 140,
+          speed: 0.72,
+          phase: 0,
+          resonance: 0.52,
+          energy: 0.72 + recentEvent.energy * 0.24,
+          drift: Math.random() * TAU,
+          wobble: 0.0026,
+          lineWidth: 2.2,
+          synthetic: true,
+          replayIntervalMs: 820,
+          transportConfig,
+        }),
+      ].slice(-MAX_ECHOES);
+      pushPulse(
+        centroid,
+        recentEvent.hue,
+        0.24 + recentEvent.energy * 0.12,
+        Math.max(recentEvent.symmetry, motifBoost?.symmetry ?? 1),
+        "ghost",
+      );
+      pushSpark(centroid, recentEvent.hue, 0.28);
+      playTone(recentEvent.hue, 0.14 + recentEvent.energy * 0.06, "ghost");
+
+      if (recentEvent.type === "hold" || recentEvent.energy > 0.76) {
+        pushWell(
+          centroid,
+          recentEvent.hue,
+          0.34 + recentEvent.energy * 0.18,
+          Math.max(2, recentEvent.symmetry),
+        );
+      }
+
+      state.surfaceEnergy = clamp(state.surfaceEnergy + 0.04, 0.12, 1.5);
+      syncMemory();
+      return;
+    }
 
     if (state.echoes.length === 0) {
       const gesture = DEMO_LIBRARY[demoCursorRef.current % DEMO_LIBRARY.length];
@@ -2194,6 +2771,7 @@ export function EchoSurface({
       triggerNoiseBurst(echo.hue, 0.12 + echo.resonance * 0.08, "hat");
     }
 
+    state.surfaceEnergy = clamp(state.surfaceEnergy + 0.02, 0.12, 1.5);
     setLastResolvedSymmetry(echo.symmetry);
   };
 
@@ -2216,6 +2794,7 @@ export function EchoSurface({
     const centroid = averagePoint(points);
     const stillness = clamp(1 - touch.travel * 1.7, 0, 1);
     const holdCharge = clamp(touch.holdCharge * 0.7 + stillness * 0.28, 0, 1);
+    const gestureType = classifyGestureEvent(touch.travel, holdCharge, points);
     const symmetry = Math.max(
       touch.symmetry,
       clamp(touch.symmetry + Math.round(holdCharge * 2), 3, 6),
@@ -2224,6 +2803,20 @@ export function EchoSurface({
     const lineWidth = 1.2 + holdCharge * 2.2 + Math.min(touch.travel * 8, 2);
     const now = performance.now();
     const endpoint = points.at(-1) ?? centroid;
+    const gestureEvent: GestureEvent = {
+      id: gestureEventIdRef.current++,
+      type: gestureType,
+      points,
+      timestamp: now,
+      duration,
+      energy,
+      hue: touch.hue,
+      symmetry,
+      centroid,
+      travel: touch.travel,
+    };
+
+    appendGestureEvent(gestureEvent);
 
     simulationRef.current.echoes = [
       ...simulationRef.current.echoes,
@@ -2258,7 +2851,7 @@ export function EchoSurface({
       triggerKick(touch.hue, 0.34 + holdCharge * 0.36);
     }
 
-    if (holdCharge > 0.44 && stillness > 0.72) {
+    if (gestureEvent.type === "hold") {
       pushWell(
         centroid,
         touch.hue,
@@ -2286,6 +2879,8 @@ export function EchoSurface({
     echoIdRef.current = snapshot.nextEchoId;
     pulseIdRef.current = snapshot.nextPulseId;
     wellIdRef.current = snapshot.nextWellId;
+    gestureEventIdRef.current = snapshot.state.gestureLog.length;
+    motifIdRef.current = snapshot.state.motifs.length;
     interferenceCooldownRef.current.clear();
     syncMemory();
     syncActiveCount();
@@ -2363,7 +2958,13 @@ export function EchoSurface({
 
       syncDemoState(demoModeActive);
 
-      if (demoModeActive && now - lastDemoAtRef.current > DEMO_INTERVAL_MS) {
+      const dreamIntervalMs = mix(
+        DEMO_INTERVAL_MS + 600,
+        DEMO_INTERVAL_MS - 700,
+        clamp(state.surfaceEnergy, 0, 1),
+      );
+
+      if (demoModeActive && now - lastDemoAtRef.current > dreamIntervalMs) {
         lastDemoAtRef.current = now;
         wakeSurfaceMemory(now);
       }
@@ -2373,10 +2974,41 @@ export function EchoSurface({
         (echo) => now - echo.bornAt < echo.memoryLifeMs,
       );
       state.wells = state.wells.filter((well) => now - well.bornAt < well.ttl);
+      state.motifs = state.motifs.filter(
+        (motif) => now - motif.lastSeenAt < 38000 && motif.strength > 0.08,
+      );
 
       if (state.echoes.length !== echoCountBeforeDecay) {
         syncMemory();
       }
+
+      const interactionDensity = state.gestureLog.reduce((total, event) => {
+        const age = now - event.timestamp;
+
+        if (age > 9000) {
+          return total;
+        }
+
+        return total + event.energy * Math.exp(-age / 2600);
+      }, 0);
+      const holdDrive = Array.from(state.activeTouches.values()).reduce(
+        (total, touch) => total + touch.holdCharge * 0.28,
+        0,
+      );
+      const targetSurfaceEnergy = clamp(
+        0.12 +
+          interactionDensity * 0.18 +
+          holdDrive +
+          state.motifs.length * 0.05 +
+          (demoModeActive ? 0.04 : 0),
+        0.12,
+        1.3,
+      );
+      state.surfaceEnergy = mix(
+        state.surfaceEnergy,
+        targetSurfaceEnergy,
+        0.05,
+      );
 
       context.clearRect(0, 0, size.width, size.height);
 
@@ -2388,8 +3020,9 @@ export function EchoSurface({
       context.fillRect(0, 0, size.width, size.height);
 
       const ambientEnergy = Math.min(
-        1.2,
-        state.echoes.length * 0.026 +
+        1.32,
+        state.surfaceEnergy * 0.68 +
+          state.echoes.length * 0.026 +
           state.activeTouches.size * 0.14 +
           state.interferenceEvents.length * 0.06 +
           state.wells.length * 0.08,
@@ -2402,8 +3035,11 @@ export function EchoSurface({
         size.height * 0.52,
         Math.max(size.width, size.height) * 0.72,
       );
-      ambientGlow.addColorStop(0, `rgba(120, 196, 182, ${0.05 + ambientEnergy * 0.05})`);
-      ambientGlow.addColorStop(0.5, "rgba(232, 133, 94, 0.06)");
+      ambientGlow.addColorStop(0, `rgba(120, 196, 182, ${0.06 + ambientEnergy * 0.07})`);
+      ambientGlow.addColorStop(
+        0.5,
+        `rgba(232, 133, 94, ${0.04 + state.surfaceEnergy * 0.05})`,
+      );
       ambientGlow.addColorStop(1, "rgba(7, 18, 25, 0)");
       context.fillStyle = ambientGlow;
       context.fillRect(0, 0, size.width, size.height);
@@ -2428,6 +3064,21 @@ export function EchoSurface({
         context.stroke();
       }
 
+      state.motifs.forEach((motif) => {
+        motif.strength = Math.max(
+          0.08,
+          motif.strength - delta * 0.00003 * (1.1 - state.surfaceEnergy * 0.35),
+        );
+        drawMotifLane(
+          context,
+          size,
+          motif,
+          now,
+          state.surfaceEnergy,
+          transportStepPosition,
+        );
+      });
+
       state.wells.forEach((well) => {
         const life = clamp(1 - (now - well.bornAt) / well.ttl, 0, 1);
         well.energy = clamp(well.energy - delta * 0.00003, 0.26, 1.5);
@@ -2436,9 +3087,13 @@ export function EchoSurface({
           getTransportStepPositionAtTime(well.scheduledAtMs, transportConfig),
         );
         const relativeStep = currentTransportStep - scheduledStep;
+        const wellStepSpacing =
+          state.surfaceEnergy > 0.72
+            ? Math.max(1, Math.floor(transportConfig.stepsPerBeat / 2))
+            : transportConfig.stepsPerBeat;
         const isBeatStep =
           relativeStep >= 0 &&
-          relativeStep % transportConfig.stepsPerBeat === 0 &&
+          relativeStep % wellStepSpacing === 0 &&
           currentTransportStep !== well.lastQuantizedStep;
 
         if (isBeatStep) {
@@ -2503,7 +3158,9 @@ export function EchoSurface({
       state.echoes.forEach((echo) => {
         const age = now - echo.bornAt;
         const trailFade = clamp(1 - age / echo.trailDecayMs, 0, 1);
-        const memoryFade = clamp(1 - age / echo.memoryLifeMs, 0, 1);
+        const memoryFade =
+          clamp(1 - age / echo.memoryLifeMs, 0, 1) *
+          (0.78 + state.surfaceEnergy * 0.42);
         echo.resonance = Math.max(0.08 * memoryFade, echo.resonance - delta * 0.00009);
         const scheduledStepPosition = getTransportStepPositionAtTime(
           echo.scheduledAtMs,
@@ -2530,6 +3187,60 @@ export function EchoSurface({
           ),
           t: sample.point.t,
         };
+
+        const motifGuide = state.motifs.reduce<
+          | {
+              motif: MotifLane;
+              sample: ReturnType<typeof getMotifMotionPoints>;
+              distanceToGhost: number;
+            }
+          | undefined
+        >((best, motif) => {
+          const sample = getMotifMotionPoints(
+            motif,
+            transportStepPosition + echo.drift,
+            state.surfaceEnergy,
+          );
+          const distanceToGhost = distance(sample.point, ghostPoint);
+
+          if (distanceToGhost > 0.22) {
+            return best;
+          }
+
+          if (!best || distanceToGhost < best.distanceToGhost) {
+            return {
+              motif,
+              sample,
+              distanceToGhost,
+            };
+          }
+
+          return best;
+        }, undefined);
+
+        if (motifGuide) {
+          liveFilaments.push({
+            from: ghostPoint,
+            to: motifGuide.sample.point,
+            hue: mix(echo.hue, motifGuide.motif.hue, 0.5),
+            strength: clamp(0.08 + motifGuide.motif.strength * 0.12, 0.08, 0.28),
+          });
+          ghostPoint.x = mix(
+            ghostPoint.x,
+            motifGuide.sample.point.x,
+            0.12 + motifGuide.motif.strength * 0.14,
+          );
+          ghostPoint.y = mix(
+            ghostPoint.y,
+            motifGuide.sample.point.y,
+            0.12 + motifGuide.motif.strength * 0.14,
+          );
+          echo.resonance = clamp(
+            echo.resonance + motifGuide.motif.strength * 0.004,
+            0.08,
+            1.8,
+          );
+        }
 
         drawMemoryBloom(
           context,
@@ -2579,9 +3290,9 @@ export function EchoSurface({
             nextPoint: sample.nextPoint,
             hue: echo.hue,
             intensity: Math.min(
-              1.2,
+              1.3,
               (0.24 + echo.energy * 0.22 + shimmer + echo.resonance * 0.26) *
-                (0.34 + memoryFade * 0.9),
+                (0.34 + memoryFade * 0.9 + state.surfaceEnergy * 0.18),
             ),
             symmetry: echo.symmetry,
             resonance: echo.resonance * (0.5 + memoryFade * 0.5),
@@ -2592,10 +3303,14 @@ export function EchoSurface({
 
           const relativeLoopStep =
             currentTransportStep - Math.floor(scheduledStepPosition);
+          const echoStepSpacing =
+            state.surfaceEnergy > 0.74
+              ? Math.max(1, Math.floor(transportConfig.stepsPerBeat / 2))
+              : transportConfig.stepsPerBeat;
           const isBeatStep =
             relativeLoopStep >= 0 &&
             currentTransportStep !== echo.lastQuantizedStep &&
-            relativeLoopStep % transportConfig.stepsPerBeat === 0;
+            relativeLoopStep % echoStepSpacing === 0;
 
           if (LOOP_ENABLED && isBeatStep) {
             echo.lastQuantizedStep = currentTransportStep;
@@ -3048,6 +3763,9 @@ export function EchoSurface({
     simulationRef.current.sparks = [];
     simulationRef.current.interferenceEvents = [];
     simulationRef.current.wells = [];
+    simulationRef.current.gestureLog = [];
+    simulationRef.current.motifs = [];
+    simulationRef.current.surfaceEnergy = 0.12;
     interferenceCooldownRef.current.clear();
     lastInteractionAtRef.current = performance.now();
     syncActiveCount();
