@@ -8,15 +8,15 @@ import { HowToPlay } from "./components/HowToPlay";
 const noteItems = [
   {
     label: "Primary Thesis",
-    text: "Gesture shape now carries melodic intent, while a shared harmonic state gives every phrase changing context as the bars move underneath it.",
+    text: "Gesture shape carries melodic intent, harmonic state provides context, and orchestration emerges from how the gesture is drawn rather than from a picker.",
   },
   {
-    label: "Musical Logic",
-    text: "You draw contour rather than pitch directly: climbs rise, drops fall, flat spans sustain, and sharper turns become leaps inside the active key and chord.",
+    label: "Voice Inference",
+    text: "Long smooth drags bloom into pads, long holds become bass drones, clustered taps wake percussion, sharp zigzags summon leads, and circles open echo voices.",
   },
   {
-    label: "Why It Matters",
-    text: "The same line can reharmonize beautifully over time, which makes the surface feel less like a one-shot sound toy and more like a tiny composition engine.",
+    label: "Desired Feeling",
+    text: "The surface should read less like software and more like a ritual score: voices flicker into being, glyphs flare at note events, and the whole field feels slightly enchanted.",
   },
 ];
 
@@ -43,9 +43,10 @@ function App() {
           <p className="eyebrow">Museum Prototype / Playable Surface</p>
           <h1>Echo Surface</h1>
           <p className="director-note__lede">
-            A contour instrument for sketching melody with motion. Draw a shape,
-            let the bar clock cycle through harmony, and the surface retraces
-            your line as a phrase that keeps finding new meaning in each chord.
+            A multi-voice ritual instrument for sketching phrases with motion.
+            Draw a gesture, let the surface infer its role in the ensemble, and
+            watch harmony, color, glyph, and motion turn it into part of a
+            living score.
           </p>
         </div>
 

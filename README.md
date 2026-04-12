@@ -6,7 +6,7 @@
 
 EchoSurface is a playful touch-first prototype exploring the idea of the screen as an instrument rather than a conventional interface.
 
-The current prototype treats gesture shape as melodic intent while a shared harmonic state provides context. Draw a contour, let the bar clock advance the chord progression, and the surface retraces that line as a reharmonizing phrase.
+The current prototype treats gesture shape as melodic intent while a shared harmonic state provides context. It also infers orchestration roles from the gesture itself, so the screen behaves more like a multi-voice ritual instrument than a menu-driven music toy.
 
 Part interaction experiment, part digital instrument, part sci-fi toy artifact.
 
@@ -25,7 +25,8 @@ Then open the local Vite URL in a browser and play with the surface using mouse 
 - Upward movement rises, downward movement falls, flatter spans sustain, and sharper vertical moves become leaps.
 - Notes are quantized to the active scale instead of mapped directly to raw frequencies.
 - Stable landing points bias toward active chord tones as the progression cycles.
-- Playback visibly retraces each contour with luminous note glyphs along the line.
+- Long smooth drags become pads, long holds become bass drones, clustered taps wake percussion, sharp zigzags become leads, and circular motion opens echo or FX voices.
+- Playback visibly retraces each contour with luminous transient glyphs at note events.
 
 ## Bootstrap
 

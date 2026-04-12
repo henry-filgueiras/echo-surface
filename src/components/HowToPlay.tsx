@@ -2,22 +2,22 @@ const withBase = (path: string) => `${import.meta.env.BASE_URL}${path}`;
 
 const guideSteps = [
   {
-    title: "1. Draw a contour",
+    title: "1. Summon a voice",
     image: withBase("guide/seed.png"),
-    alt: "Screenshot of Echo Surface showing a single luminous contour phrase crossing the surface.",
-    text: "Move left to right and think in shape, not exact notes. Upward arcs will climb, downward arcs will fall, and flatter spans will hold.",
+    alt: "Screenshot of Echo Surface showing luminous role-colored phrases suspended over a ritual-like score.",
+    text: "The surface infers role from gesture. Long smooth drags feel like pads, long holds become bass, clustered taps read as percussion, zigzags turn into leads, and circles wake echo voices.",
   },
   {
-    title: "2. Let harmony move",
+    title: "2. Let the rite unfold",
     image: withBase("guide/trace.png"),
-    alt: "Screenshot of Echo Surface with multiple contour phrases looping under a shared harmonic HUD.",
-    text: "A shared bar clock advances the chord progression automatically, so the same line can feel grounded, suspended, or urgent as context changes.",
+    alt: "Screenshot of Echo Surface with several inferred voices weaving across the same harmonic field.",
+    text: "Harmony still moves underneath everything on a shared bar clock, but now each voice has its own density, color, glyph, and motion inside the same enchanted frame.",
   },
   {
-    title: "3. Watch it retrace",
+    title: "3. Read the living score",
     image: withBase("guide/hold.png"),
-    alt: "Screenshot of Echo Surface with playback retracing a contour and bright note glyphs glowing along the line.",
-    text: "Playback travels back across your contour with luminous note glyphs, turning each saved trace into a small melodic loop rather than a raw touch echo.",
+    alt: "Screenshot of Echo Surface with playback retracing contours and transient glowing glyphs marking note events.",
+    text: "Playback retraces each stored path and throws off transient glyph flashes at note events, so the surface feels like a magical score writing and performing itself in real time.",
   },
 ];
 
@@ -28,9 +28,9 @@ export function HowToPlay() {
         <p className="eyebrow">Field Guide / Infographic</p>
         <h2>How to play the instrument</h2>
         <p className="guide-board__lede">
-          The surface now behaves like a composition toy: your hand draws a
-          melodic contour, the harmony keeps moving, and every stored line comes
-          back as a phrase with clearer musical intent.
+          The surface now behaves like a small ceremonial ensemble. Gestures
+          infer orchestration roles, harmony supplies context, and the screen
+          responds like an illuminated score rather than a control panel.
         </p>
       </div>
 

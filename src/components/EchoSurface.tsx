@@ -36,6 +36,32 @@ type SurfaceSize = {
   height: number;
 };
 
+type VoiceRole = "pad" | "bass" | "lead" | "percussion" | "echo";
+
+type RolePalette = {
+  hue: number;
+  saturation: number;
+  lightness: number;
+};
+
+type RoleMotion = "breathe" | "weight" | "spark" | "pulse" | "orbit";
+
+type VoiceRoleStyle = {
+  glyph: "circle" | "square" | "star" | "diamond" | "wave";
+  palette: RolePalette;
+  motion: RoleMotion;
+};
+
+type RecentGesture = {
+  timestamp: number;
+  centroid: NormalizedPoint;
+  durationMs: number;
+  travel: number;
+  tapLike: boolean;
+  circularity: number;
+  zigzag: number;
+};
+
 type ContourAnchor = {
   stepIndex: number;
   drawRatio: number;
@@ -62,6 +88,7 @@ type PhraseNote = {
 type ContourLoop = {
   id: number;
   bornAt: number;
+  role: VoiceRole;
   hue: number;
   energy: number;
   points: NormalizedPoint[];
@@ -74,6 +101,8 @@ type ContourLoop = {
   lastPhraseToken: string;
   phraseNotes: PhraseNote[];
   synthetic: boolean;
+  motionSeed: number;
+  clusterSize: number;
 };
 
 type PlaybackFlash = {
@@ -81,6 +110,7 @@ type PlaybackFlash = {
   bornAt: number;
   ttl: number;
   point: NormalizedPoint;
+  role: VoiceRole;
   hue: number;
   strength: number;
   kind: "touch" | "note" | "bar";
@@ -91,6 +121,7 @@ type AudioEngine = {
   compressor: DynamicsCompressorNode | null;
   master: GainNode | null;
   fxSend: GainNode | null;
+  noiseBuffer: AudioBuffer | null;
   muted: boolean;
   masterLevel: number;
 };
@@ -99,15 +130,17 @@ type SimulationState = {
   activeTouches: Map<number, ActiveTouch>;
   loops: ContourLoop[];
   flashes: PlaybackFlash[];
+  recentGestures: RecentGesture[];
   surfaceEnergy: number;
 };
 
 type MemoryChip = {
   id: number;
   hue: number;
+  role: VoiceRole;
 };
 
-type ToneVoice = "lead" | "touch" | "bar";
+type ToneVoice = VoiceRole | "touch" | "bar";
 
 export type SurfacePreset = "seed" | "trace" | "hold";
 
@@ -140,6 +173,33 @@ const NOTE_NAMES = [
   "A#",
   "B",
 ] as const;
+const VOICE_ROLE_STYLES: Record<VoiceRole, VoiceRoleStyle> = {
+  pad: {
+    glyph: "circle",
+    palette: { hue: 248, saturation: 88, lightness: 70 },
+    motion: "breathe",
+  },
+  bass: {
+    glyph: "square",
+    palette: { hue: 6, saturation: 80, lightness: 54 },
+    motion: "weight",
+  },
+  lead: {
+    glyph: "star",
+    palette: { hue: 44, saturation: 95, lightness: 68 },
+    motion: "spark",
+  },
+  percussion: {
+    glyph: "diamond",
+    palette: { hue: 0, saturation: 0, lightness: 92 },
+    motion: "pulse",
+  },
+  echo: {
+    glyph: "wave",
+    palette: { hue: 176, saturation: 72, lightness: 62 },
+    motion: "orbit",
+  },
+};
 const MODE_INTERVALS = {
   major: [0, 2, 4, 5, 7, 9, 11],
   minor: [0, 2, 3, 5, 7, 8, 10],
@@ -475,6 +535,64 @@ const drawPolyline = (
   context.stroke();
 };
 
+const getRoleColor = (
+  role: VoiceRole,
+  alpha: number,
+  lightnessOffset = 0,
+  saturationOffset = 0,
+) => {
+  const palette = VOICE_ROLE_STYLES[role].palette;
+
+  return `hsla(${palette.hue}, ${clamp(
+    palette.saturation + saturationOffset,
+    0,
+    100,
+  )}%, ${clamp(palette.lightness + lightnessOffset, 0, 100)}%, ${alpha})`;
+};
+
+const getGestureBounds = (points: NormalizedPoint[]) =>
+  points.reduce(
+    (bounds, current) => ({
+      minX: Math.min(bounds.minX, current.x),
+      maxX: Math.max(bounds.maxX, current.x),
+      minY: Math.min(bounds.minY, current.y),
+      maxY: Math.max(bounds.maxY, current.y),
+    }),
+    {
+      minX: points[0]?.x ?? 0.5,
+      maxX: points[0]?.x ?? 0.5,
+      minY: points[0]?.y ?? 0.5,
+      maxY: points[0]?.y ?? 0.5,
+    },
+  );
+
+const smoothResampledPath = (
+  points: NormalizedPoint[],
+  count: number,
+  smoothingPasses: number,
+) => {
+  let result = resamplePath(points, count);
+
+  for (let pass = 0; pass < smoothingPasses; pass += 1) {
+    result = result.map((current, index) => {
+      if (index === 0 || index === result.length - 1) {
+        return current;
+      }
+
+      const previous = result[index - 1];
+      const next = result[index + 1];
+
+      return point(
+        mix(current.x, (previous.x + next.x) * 0.5, 0.44),
+        mix(current.y, (previous.y + next.y) * 0.5, 0.44),
+        current.t,
+      );
+    });
+  }
+
+  return result;
+};
+
 const chooseHue = (pointValue: NormalizedPoint, interactions: number) => {
   const seed = pointValue.x * 132 + pointValue.y * 64 + interactions * 18;
   return 18 + (seed % 196);
@@ -577,6 +695,221 @@ const analyzeContour = (points: NormalizedPoint[]) => {
   };
 };
 
+const summarizeGesture = (
+  points: NormalizedPoint[],
+  durationMs: number,
+  recentGestures: RecentGesture[],
+) => {
+  const centroid = averagePoint(points);
+  const travel = getGestureTravel(points);
+  const bounds = getGestureBounds(points);
+  const xSpan = bounds.maxX - bounds.minX;
+  const ySpan = bounds.maxY - bounds.minY;
+  const directDistance = distance(points[0] ?? centroid, points.at(-1) ?? centroid);
+  const smoothness = travel / Math.max(directDistance, 0.01);
+  let signChanges = 0;
+  let previousVerticalSign = 0;
+
+  for (let index = 1; index < points.length; index += 1) {
+    const sign = Math.sign(points[index - 1].y - points[index].y);
+    if (sign !== 0 && previousVerticalSign !== 0 && sign !== previousVerticalSign) {
+      signChanges += 1;
+    }
+    if (sign !== 0) {
+      previousVerticalSign = sign;
+    }
+  }
+
+  const zigzag = signChanges / Math.max(points.length - 1, 1);
+  const startEndDistance = distance(points[0] ?? centroid, points.at(-1) ?? centroid);
+  const balancedSpan =
+    1 -
+    clamp(
+      Math.abs(xSpan - ySpan) / Math.max(Math.max(xSpan, ySpan), 0.001),
+      0,
+      1,
+    );
+  const radialTravel =
+    points.reduce(
+      (total, current) => total + Math.hypot(current.x - centroid.x, current.y - centroid.y),
+      0,
+    ) / Math.max(points.length, 1);
+  const circularity = clamp(
+    (1 - clamp(startEndDistance / 0.16, 0, 1)) * 0.44 +
+      balancedSpan * 0.24 +
+      clamp(travel / Math.max(radialTravel * TAU, 0.14), 0, 1) * 0.32,
+    0,
+    1,
+  );
+  const tapLike = durationMs < 280 && travel < 0.05;
+  const nearbyTapCount = recentGestures.filter(
+    (gesture) =>
+      gesture.tapLike &&
+      durationMs > 0 &&
+      gesture.timestamp > performance.now() - 1100 &&
+      distance(gesture.centroid, centroid) < 0.14,
+  ).length;
+
+  return {
+    centroid,
+    durationMs,
+    travel,
+    xSpan,
+    ySpan,
+    smoothness,
+    zigzag,
+    circularity,
+    tapLike,
+    nearbyTapCount,
+  };
+};
+
+const createBassDronePath = (points: NormalizedPoint[]) => {
+  const centroid = averagePoint(points);
+  const bounds = getGestureBounds(points);
+  const xStart = clamp(bounds.minX - 0.04, 0.06, 0.84);
+  const xEnd = clamp(bounds.maxX + 0.08, xStart + 0.12, 0.94);
+  const baseY = clamp(centroid.y + 0.06, 0.32, 0.86);
+
+  return [
+    point(xStart, baseY, 0),
+    point(lerp(xStart, xEnd, 0.28), baseY - 0.02, 220),
+    point(lerp(xStart, xEnd, 0.56), baseY - 0.03, 420),
+    point(lerp(xStart, xEnd, 0.82), baseY - 0.015, 700),
+    point(xEnd, baseY, 980),
+  ];
+};
+
+const createPercussionPath = (
+  points: NormalizedPoint[],
+  nearbyTapCount: number,
+) => {
+  const centroid = averagePoint(points);
+  const width = clamp(0.08 + nearbyTapCount * 0.018, 0.08, 0.18);
+  const height = clamp(0.05 + nearbyTapCount * 0.014, 0.05, 0.13);
+  const left = clamp(centroid.x - width * 0.5, 0.08, 0.88);
+  const right = clamp(centroid.x + width * 0.5, left + 0.05, 0.92);
+  const midX = (left + right) * 0.5;
+  const top = clamp(centroid.y - height * 0.5, 0.12, 0.82);
+  const bottom = clamp(centroid.y + height * 0.5, top + 0.03, 0.88);
+
+  return [
+    point(left, centroid.y, 0),
+    point(midX, top, 110),
+    point(right, centroid.y, 240),
+    point(midX, bottom, 360),
+    point(left, centroid.y, 520),
+  ];
+};
+
+const createEchoPath = (points: NormalizedPoint[]) => {
+  const resampled = smoothResampledPath(points, 14, 1);
+  const first = resampled[0];
+  const last = resampled.at(-1) ?? first;
+
+  if (distance(first, last) < 0.04) {
+    return resampled;
+  }
+
+  const centroid = averagePoint(resampled);
+  return [
+    ...resampled,
+    point(
+      mix(last.x, centroid.x, 0.42),
+      mix(last.y, centroid.y, 0.42),
+      (last.t ?? 0) + 140,
+    ),
+    point(first.x, first.y, (last.t ?? 0) + 280),
+  ];
+};
+
+const createLeadPath = (points: NormalizedPoint[]) => {
+  const contour = coerceContourPoints(points);
+  const centroid = averagePoint(contour);
+
+  return contour.map((current, index) => {
+    if (index === 0 || index === contour.length - 1) {
+      return current;
+    }
+
+    return point(
+      current.x,
+      clamp(centroid.y + (current.y - centroid.y) * 1.12, 0.08, 0.92),
+      current.t,
+    );
+  });
+};
+
+const inferVoiceRole = (
+  points: NormalizedPoint[],
+  durationMs: number,
+  recentGestures: RecentGesture[],
+) => {
+  const summary = summarizeGesture(points, durationMs, recentGestures);
+
+  if (durationMs > 1050 && summary.travel < 0.05) {
+    return { role: "bass" as const, summary };
+  }
+
+  if (
+    summary.circularity > 0.68 &&
+    summary.travel > 0.14 &&
+    summary.xSpan > 0.07 &&
+    summary.ySpan > 0.07
+  ) {
+    return { role: "echo" as const, summary };
+  }
+
+  if (summary.tapLike && (summary.nearbyTapCount >= 1 || summary.durationMs < 180)) {
+    return { role: "percussion" as const, summary };
+  }
+
+  if (
+    summary.zigzag > 0.22 &&
+    summary.travel > 0.12 &&
+    (summary.ySpan > 0.11 || summary.smoothness > 1.5)
+  ) {
+    return { role: "lead" as const, summary };
+  }
+
+  if (
+    durationMs > 620 &&
+    summary.travel > 0.16 &&
+    summary.smoothness < 1.7 &&
+    summary.zigzag < 0.18
+  ) {
+    return { role: "pad" as const, summary };
+  }
+
+  if (summary.tapLike) {
+    return { role: "percussion" as const, summary };
+  }
+
+  return {
+    role: summary.smoothness < 1.55 ? ("pad" as const) : ("lead" as const),
+    summary,
+  };
+};
+
+const shapePointsForRole = (
+  role: VoiceRole,
+  points: NormalizedPoint[],
+  summary: ReturnType<typeof summarizeGesture>,
+) => {
+  switch (role) {
+    case "pad":
+      return smoothResampledPath(coerceContourPoints(points), 12, 2);
+    case "bass":
+      return createBassDronePath(points);
+    case "lead":
+      return createLeadPath(points);
+    case "percussion":
+      return createPercussionPath(points, summary.nearbyTapCount);
+    case "echo":
+      return createEchoPath(smoothResampledPath(points, 16, 1));
+  }
+};
+
 const buildPhraseNotes = (
   loop: ContourLoop,
   harmonicState: HarmonicState,
@@ -585,7 +918,17 @@ const buildPhraseNotes = (
   const scaleMidis = buildExtendedScaleMidis(harmonicState);
   const chordPitchClasses = getChordPitchClasses(harmonicState, chordSymbol);
   const firstAnchor = loop.anchors[0];
-  const startTarget = loop.desiredRegisterMidi + (0.5 - firstAnchor.point.y) * 4;
+  const registerTarget =
+    loop.role === "bass"
+      ? clamp(loop.desiredRegisterMidi - 24, 36, 56)
+      : loop.role === "pad"
+        ? clamp(loop.desiredRegisterMidi - 8, 54, 72)
+        : loop.role === "lead"
+          ? clamp(loop.desiredRegisterMidi + 6, 68, 88)
+          : loop.role === "percussion"
+            ? clamp(loop.desiredRegisterMidi - 4, 50, 72)
+            : clamp(loop.desiredRegisterMidi + 2, 62, 84);
+  const startTarget = registerTarget + (0.5 - firstAnchor.point.y) * 4;
   let scaleIndex = findNearestChordToneIndex(
     scaleMidis,
     startTarget,
@@ -594,12 +937,22 @@ const buildPhraseNotes = (
 
   const notes = loop.anchors.map((anchor, index) => {
     if (index > 0) {
+      const roleMovement =
+        loop.role === "pad"
+          ? clamp(anchor.movement, -1, 1)
+          : loop.role === "bass"
+            ? clamp(anchor.movement, -1, 1)
+            : loop.role === "echo"
+              ? clamp(anchor.movement, -2, 2)
+              : anchor.movement;
       const rawIndex = clamp(
-        scaleIndex + anchor.movement,
+        scaleIndex + roleMovement,
         0,
         scaleMidis.length - 1,
       );
       const wantsStability =
+        loop.role === "pad" ||
+        loop.role === "bass" ||
         anchor.accent ||
         anchor.sustain ||
         index === loop.anchors.length - 1 ||
@@ -629,18 +982,67 @@ const buildPhraseNotes = (
     }
 
     const midi = scaleMidis[scaleIndex];
+    const onStrongSubdivision =
+      index === 0 ||
+      index === loop.anchors.length - 1 ||
+      index % Math.max(1, Math.floor(loop.anchors.length / 4)) === 0;
+    const trigger =
+      loop.role === "pad"
+        ? onStrongSubdivision || anchor.accent
+        : loop.role === "bass"
+          ? index === 0 || index === Math.floor(loop.anchors.length / 2) || index === loop.anchors.length - 1
+          : loop.role === "lead"
+            ? !anchor.sustain || anchor.accent || anchor.leap
+            : loop.role === "percussion"
+              ? index === 0 || index % 2 === 0 || anchor.accent
+              : index > 0 && (index % 2 === 1 || anchor.leap || anchor.accent || index === loop.anchors.length - 1);
+    const gateSteps =
+      loop.role === "pad"
+        ? 2 + (anchor.sustain ? 1 : 0)
+        : loop.role === "bass"
+          ? index === 0 ? 4 : 2
+          : loop.role === "percussion"
+            ? 1
+            : loop.role === "echo"
+              ? 2
+              : 1;
+    const resolvedMidi =
+      loop.role === "bass"
+        ? scaleMidis[
+            findNearestChordToneIndex(
+              scaleMidis,
+              index === 0 ? registerTarget - 5 : registerTarget + 2,
+              index % 2 === 0 ? [chordPitchClasses[0], chordPitchClasses[2]] : chordPitchClasses,
+            )
+          ]
+        : loop.role === "percussion"
+          ? scaleMidis[
+              findNearestChordToneIndex(
+                scaleMidis,
+                registerTarget + (index % 3 === 0 ? 7 : 0),
+                index % 3 === 1
+                  ? [chordPitchClasses[1] ?? chordPitchClasses[0]]
+                  : [chordPitchClasses[0], chordPitchClasses[2] ?? chordPitchClasses[0]],
+              )
+            ]
+          : midi;
     const phraseNote: PhraseNote = {
       stepIndex: anchor.stepIndex,
-      midi,
-      trigger: true,
-      gateSteps: 1,
-      chordTone: chordPitchClasses.includes(modulo(midi, 12)),
+      midi: resolvedMidi,
+      trigger,
+      gateSteps,
+      chordTone: chordPitchClasses.includes(modulo(resolvedMidi, 12)),
       accent: clamp(
-        0.28 + anchor.emphasis * 0.54 + (anchor.leap ? 0.12 : 0),
+        0.24 +
+          anchor.emphasis * 0.46 +
+          (anchor.leap ? 0.16 : 0) +
+          (loop.role === "lead" ? 0.12 : 0) +
+          (loop.role === "percussion" ? 0.08 : 0) +
+          (loop.role === "bass" && index === 0 ? 0.18 : 0),
         0.2,
         1,
       ),
-      sustain: anchor.sustain,
+      sustain: anchor.sustain || loop.role === "pad" || loop.role === "bass",
       leap: anchor.leap,
       movement: anchor.movement,
     };
@@ -649,7 +1051,11 @@ const buildPhraseNotes = (
   });
 
   for (let index = 1; index < notes.length; index += 1) {
-    if (loop.anchors[index].sustain && notes[index].midi === notes[index - 1].midi) {
+    if (
+      loop.role !== "percussion" &&
+      loop.anchors[index].sustain &&
+      notes[index].midi === notes[index - 1].midi
+    ) {
       notes[index].trigger = false;
       notes[index - 1].gateSteps += 1;
     }
@@ -661,28 +1067,33 @@ const buildPhraseNotes = (
 const createLoopRecord = ({
   id,
   bornAt,
+  role,
   hue,
   energy,
   points,
   scheduledAtMs,
   synthetic,
+  clusterSize = 1,
 }: {
   id: number;
   bornAt: number;
+  role: VoiceRole;
   hue: number;
   energy: number;
   points: NormalizedPoint[];
   scheduledAtMs: number;
   synthetic: boolean;
+  clusterSize?: number;
 }): ContourLoop => {
   const contour = analyzeContour(points);
 
   return {
     id,
     bornAt,
+    role,
     hue,
     energy,
-    points: coerceContourPoints(points),
+    points,
     anchors: contour.anchors,
     noteCount: contour.noteCount,
     desiredRegisterMidi: contour.desiredRegisterMidi,
@@ -692,6 +1103,8 @@ const createLoopRecord = ({
     lastPhraseToken: "",
     phraseNotes: [],
     synthetic,
+    motionSeed: Math.random() * TAU,
+    clusterSize,
   };
 };
 
@@ -701,6 +1114,140 @@ const getCurrentChordHue = (harmonicState: HarmonicState, chordSymbol: string) =
     getChordPitchClasses(harmonicState, chordSymbol)[0] ?? tonicPitchClass;
 
   return 20 + modulo(chordRootPitchClass * 27 + tonicPitchClass * 11, 220);
+};
+
+const getLoopHue = (role: VoiceRole) => {
+  const palette = VOICE_ROLE_STYLES[role].palette;
+  return palette.hue;
+};
+
+const drawRoleGlyph = (
+  context: CanvasRenderingContext2D,
+  role: VoiceRole,
+  x: number,
+  y: number,
+  size: number,
+  alpha: number,
+  rotation = 0,
+) => {
+  context.save();
+  context.translate(x, y);
+  context.rotate(rotation);
+  context.strokeStyle = getRoleColor(role, alpha, 18, role === "percussion" ? -100 : 8);
+  context.fillStyle = getRoleColor(role, alpha * 0.42, 12, role === "percussion" ? -100 : 2);
+  context.lineWidth = 1.25;
+  context.lineCap = "round";
+  context.lineJoin = "round";
+
+  switch (VOICE_ROLE_STYLES[role].glyph) {
+    case "circle":
+      context.beginPath();
+      context.arc(0, 0, size * 0.72, 0, TAU);
+      context.fill();
+      context.stroke();
+      break;
+    case "square":
+      context.beginPath();
+      context.rect(-size * 0.62, -size * 0.62, size * 1.24, size * 1.24);
+      context.fill();
+      context.stroke();
+      break;
+    case "diamond":
+      context.beginPath();
+      context.moveTo(0, -size * 0.78);
+      context.lineTo(size * 0.78, 0);
+      context.lineTo(0, size * 0.78);
+      context.lineTo(-size * 0.78, 0);
+      context.closePath();
+      context.fill();
+      context.stroke();
+      break;
+    case "wave":
+      context.fillStyle = "transparent";
+      context.beginPath();
+      context.moveTo(-size, 0);
+      context.quadraticCurveTo(-size * 0.5, -size * 0.7, 0, 0);
+      context.quadraticCurveTo(size * 0.5, size * 0.7, size, 0);
+      context.stroke();
+      break;
+    case "star":
+      context.beginPath();
+      for (let index = 0; index < 8; index += 1) {
+        const angle = (index / 8) * TAU;
+        const radius = index % 2 === 0 ? size : size * 0.42;
+        const px = Math.cos(angle) * radius;
+        const py = Math.sin(angle) * radius;
+
+        if (index === 0) {
+          context.moveTo(px, py);
+        } else {
+          context.lineTo(px, py);
+        }
+      }
+      context.closePath();
+      context.fill();
+      context.stroke();
+      break;
+  }
+
+  context.restore();
+};
+
+const warpPointForRole = (
+  pointValue: NormalizedPoint,
+  nextPoint: NormalizedPoint,
+  role: VoiceRole,
+  motionSeed: number,
+  progress: number,
+  now: number,
+) => {
+  const dx = nextPoint.x - pointValue.x;
+  const dy = nextPoint.y - pointValue.y;
+  const magnitude = Math.hypot(dx, dy) || 1;
+  const tangentX = dx / magnitude;
+  const tangentY = dy / magnitude;
+  const perpX = -tangentY;
+  const perpY = tangentX;
+  const phase = now * 0.0014 + motionSeed + progress * TAU;
+  let offsetX = 0;
+  let offsetY = 0;
+
+  switch (VOICE_ROLE_STYLES[role].motion) {
+    case "breathe":
+      offsetX = perpX * Math.sin(phase * 0.7) * 0.012;
+      offsetY = perpY * Math.sin(phase * 0.7) * 0.012;
+      break;
+    case "weight":
+      offsetY = 0.012 + Math.sin(phase * 0.5) * 0.006;
+      offsetX = tangentX * 0.004 * Math.sin(phase);
+      break;
+    case "spark":
+      offsetX =
+        tangentX * 0.008 * Math.sin(phase * 1.8) +
+        perpX * 0.004 * Math.cos(phase * 2.1);
+      offsetY =
+        tangentY * 0.008 * Math.sin(phase * 1.8) +
+        perpY * 0.004 * Math.cos(phase * 2.1);
+      break;
+    case "pulse":
+      offsetX = perpX * 0.006 * Math.sign(Math.sin(phase * 2.8));
+      offsetY = perpY * 0.006 * Math.sign(Math.sin(phase * 2.8));
+      break;
+    case "orbit":
+      offsetX =
+        perpX * Math.sin(phase * 1.1) * 0.018 +
+        tangentX * Math.cos(phase * 0.8) * 0.004;
+      offsetY =
+        perpY * Math.sin(phase * 1.1) * 0.018 +
+        tangentY * Math.cos(phase * 0.8) * 0.004;
+      break;
+  }
+
+  return point(
+    clamp(pointValue.x + offsetX, 0.04, 0.96),
+    clamp(pointValue.y + offsetY, 0.05, 0.95),
+    pointValue.t,
+  );
 };
 
 const makeSurfacePoint = (
@@ -728,8 +1275,8 @@ const createPresetState = (
   let nextFlashId = 0;
 
   const makeLoop = (
+    role: VoiceRole,
     points: NormalizedPoint[],
-    hue: number,
     barOffset: number,
     phase: number,
     energy: number,
@@ -737,7 +1284,8 @@ const createPresetState = (
     createLoopRecord({
       id: nextLoopId++,
       bornAt: now - 2200 + phase,
-      hue,
+      role,
+      hue: getLoopHue(role),
       energy,
       points,
       scheduledAtMs:
@@ -749,6 +1297,7 @@ const createPresetState = (
     return {
       loops: [
         makeLoop(
+          "lead",
           [
             point(0.16, 0.63, 0),
             point(0.28, 0.53, 160),
@@ -756,7 +1305,6 @@ const createPresetState = (
             point(0.64, 0.46, 620),
             point(0.83, 0.32, 880),
           ],
-          34,
           1,
           0,
           0.78,
@@ -768,7 +1316,8 @@ const createPresetState = (
           bornAt: now - 180,
           ttl: 980,
           point: point(0.64, 0.46, 0),
-          hue: 34,
+          role: "lead" as const,
+          hue: getLoopHue("lead"),
           strength: 0.82,
           kind: "note" as const,
         },
@@ -780,6 +1329,7 @@ const createPresetState = (
     return {
       loops: [
         makeLoop(
+          "pad",
           [
             point(0.12, 0.7, 0),
             point(0.26, 0.56, 180),
@@ -787,12 +1337,12 @@ const createPresetState = (
             point(0.61, 0.29, 580),
             point(0.84, 0.41, 860),
           ],
-          172,
           2,
           0,
           0.92,
         ),
         makeLoop(
+          "lead",
           [
             point(0.18, 0.25, 0),
             point(0.34, 0.36, 180),
@@ -800,7 +1350,6 @@ const createPresetState = (
             point(0.66, 0.64, 620),
             point(0.86, 0.57, 880),
           ],
-          28,
           1,
           140,
           0.84,
@@ -813,6 +1362,7 @@ const createPresetState = (
   return {
     loops: [
       makeLoop(
+        "pad",
         [
           point(0.14, 0.56, 0),
           point(0.3, 0.46, 170),
@@ -820,12 +1370,12 @@ const createPresetState = (
           point(0.66, 0.45, 620),
           point(0.85, 0.29, 920),
         ],
-        122,
         1,
         0,
         0.96,
       ),
       makeLoop(
+        "bass",
         [
           point(0.18, 0.74, 0),
           point(0.34, 0.7, 170),
@@ -833,7 +1383,6 @@ const createPresetState = (
           point(0.61, 0.72, 580),
           point(0.83, 0.69, 860),
         ],
-        74,
         0,
         180,
         0.74,
@@ -856,6 +1405,7 @@ export function EchoSurface({
     compressor: null,
     master: null,
     fxSend: null,
+    noiseBuffer: null,
     muted: false,
     masterLevel: 0.2,
   });
@@ -863,6 +1413,7 @@ export function EchoSurface({
     activeTouches: new Map(),
     loops: [],
     flashes: [],
+    recentGestures: [],
     surfaceEnergy: 0.18,
   });
   const harmonicStateRef = useRef<HarmonicState>(DEFAULT_HARMONIC_STATE);
@@ -881,17 +1432,21 @@ export function EchoSurface({
     [harmonicState],
   );
   const keyLabel = `${harmonicState.tonic} ${harmonicState.mode}`;
-  const progressionLabel = harmonicState.progression.join(" • ");
+  const ensembleLabel =
+    memory.length === 0
+      ? "voices awaken by gesture"
+      : Array.from(new Set(memory.map((chip) => chip.role))).join(" • ");
   const whisperLabel =
     activeCount > 0
-      ? "shape the phrase left to right • rise climbs • flat holds • drops fall"
-      : "draw a contour left to right and let the harmony reframe it";
+      ? "long drag pad • hold bass • tap cluster percussion • zigzag lead • circle echo"
+      : "draw a phrase and let the surface infer the voice";
 
   const syncMemory = () => {
     setMemory(
       simulationRef.current.loops.map((loop) => ({
         id: loop.id,
         hue: loop.hue,
+        role: loop.role,
       })),
     );
   };
@@ -902,6 +1457,7 @@ export function EchoSurface({
 
   const pushFlash = (
     pointValue: NormalizedPoint,
+    role: VoiceRole,
     hue: number,
     strength: number,
     kind: PlaybackFlash["kind"],
@@ -911,6 +1467,7 @@ export function EchoSurface({
       bornAt: performance.now(),
       ttl: kind === "bar" ? 1200 : 920,
       point: pointValue,
+      role,
       hue,
       strength,
       kind,
@@ -939,6 +1496,8 @@ export function EchoSurface({
       const delay = context.createDelay(1.2);
       const feedback = context.createGain();
       const delayFilter = context.createBiquadFilter();
+      const noiseBuffer = context.createBuffer(1, context.sampleRate, context.sampleRate);
+      const noiseData = noiseBuffer.getChannelData(0);
 
       compressor.threshold.value = -22;
       compressor.knee.value = 20;
@@ -955,6 +1514,10 @@ export function EchoSurface({
 
       fxSend.gain.value = 0.15;
 
+      for (let index = 0; index < noiseData.length; index += 1) {
+        noiseData[index] = Math.random() * 2 - 1;
+      }
+
       fxSend.connect(delay);
       delay.connect(delayFilter);
       delayFilter.connect(feedback);
@@ -967,11 +1530,57 @@ export function EchoSurface({
       engine.compressor = compressor;
       engine.master = master;
       engine.fxSend = fxSend;
+      engine.noiseBuffer = noiseBuffer;
     }
 
     if (engine.context.state === "suspended") {
       await engine.context.resume();
     }
+  };
+
+  const triggerNoiseBurst = (role: VoiceRole, intensity: number, hue: number) => {
+    const engine = soundRef.current;
+
+    if (
+      !engine.context ||
+      !engine.compressor ||
+      !engine.fxSend ||
+      !engine.noiseBuffer ||
+      engine.muted
+    ) {
+      return;
+    }
+
+    const context = engine.context;
+    const now = context.currentTime;
+    const source = context.createBufferSource();
+    const highpass = context.createBiquadFilter();
+    const bandpass = context.createBiquadFilter();
+    const gain = context.createGain();
+    const send = context.createGain();
+
+    source.buffer = engine.noiseBuffer;
+    highpass.type = "highpass";
+    highpass.frequency.value = role === "percussion" ? 1800 : 2600;
+    bandpass.type = "bandpass";
+    bandpass.frequency.value = role === "percussion" ? 3200 : 4200 + hue;
+    bandpass.Q.value = role === "percussion" ? 1.2 : 2.2;
+
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.035 + intensity * 0.08, now + 0.004);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + (role === "percussion" ? 0.12 : 0.22));
+
+    send.gain.value = role === "echo" ? 0.22 : 0.08;
+
+    source.connect(highpass);
+    highpass.connect(bandpass);
+    bandpass.connect(gain);
+    gain.connect(engine.compressor);
+    gain.connect(send);
+    send.connect(engine.fxSend);
+
+    source.start(now);
+    source.stop(now + 0.24);
   };
 
   const playMelodicTone = ({
@@ -1011,37 +1620,95 @@ export function EchoSurface({
     const brightness = hue / 220;
     const isBar = voice === "bar";
     const isTouch = voice === "touch";
+    const role = !isBar && !isTouch ? voice : undefined;
 
-    primary.type = isBar ? "triangle" : "sawtooth";
-    secondary.type = isBar ? "sine" : "triangle";
+    primary.type =
+      isBar || role === "pad"
+        ? "triangle"
+        : role === "bass"
+          ? "sine"
+          : role === "percussion"
+            ? "square"
+            : "sawtooth";
+    secondary.type =
+      isBar || role === "echo"
+        ? "sine"
+        : role === "bass"
+          ? "triangle"
+          : "triangle";
     sub.type = "sine";
 
-    primary.detune.value = isTouch ? -3 : -7;
-    secondary.detune.value = isTouch ? 3 : 7;
+    primary.detune.value = isTouch ? -3 : role === "pad" ? -2 : -7;
+    secondary.detune.value = isTouch ? 3 : role === "pad" ? 2 : 7;
 
     primary.frequency.setValueAtTime(frequency, now);
-    secondary.frequency.setValueAtTime(frequency * (isBar ? 1.5 : 1.003), now);
-    sub.frequency.setValueAtTime(frequency * (isBar ? 0.5 : 0.5), now);
+    secondary.frequency.setValueAtTime(
+      frequency *
+        (isBar
+          ? 1.5
+          : role === "bass"
+            ? 1.01
+            : role === "percussion"
+              ? 2
+              : 1.003),
+      now,
+    );
+    sub.frequency.setValueAtTime(
+      frequency * (isBar ? 0.5 : role === "percussion" ? 1 : 0.5),
+      now,
+    );
 
-    filter.type = isBar ? "lowpass" : "bandpass";
-    filter.Q.value = isBar ? 1.1 : 2.4;
+    filter.type =
+      isBar || role === "bass" || role === "pad"
+        ? "lowpass"
+        : role === "echo"
+          ? "bandpass"
+          : "bandpass";
+    filter.Q.value =
+      isBar ? 1.1 : role === "pad" ? 0.9 : role === "echo" ? 4.2 : role === "percussion" ? 5.6 : 2.4;
     filter.frequency.setValueAtTime(
-      (isBar ? 420 : 820) + accent * 1400 + brightness * 500,
+      (isBar
+        ? 420
+        : role === "bass"
+          ? 280
+          : role === "pad"
+            ? 620
+            : role === "echo"
+              ? 1800
+              : role === "percussion"
+                ? 2400
+                : 820) +
+        accent * 1400 +
+        brightness * 500,
       now,
     );
     filter.frequency.exponentialRampToValueAtTime(
-      isBar ? 180 : 260,
+      isBar ? 180 : role === "bass" ? 120 : role === "pad" ? 160 : role === "echo" ? 720 : 260,
       now + duration,
     );
 
     gain.gain.setValueAtTime(0.0001, now);
     gain.gain.exponentialRampToValueAtTime(
-      (isBar ? 0.055 : isTouch ? 0.045 : 0.072) + accent * 0.06,
-      now + (isBar ? 0.04 : 0.018),
+      (isBar
+        ? 0.055
+        : isTouch
+          ? 0.045
+          : role === "pad"
+            ? 0.05
+            : role === "bass"
+              ? 0.06
+              : role === "percussion"
+                ? 0.04
+                : role === "echo"
+                  ? 0.038
+                  : 0.072) +
+        accent * 0.06,
+      now + (isBar ? 0.04 : role === "pad" ? 0.08 : role === "bass" ? 0.03 : 0.018),
     );
     gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
 
-    send.gain.value = isBar ? 0.08 : 0.16;
+    send.gain.value =
+      isBar ? 0.08 : role === "pad" ? 0.22 : role === "echo" ? 0.32 : role === "bass" ? 0.06 : 0.16;
 
     primary.connect(filter);
     secondary.connect(filter);
@@ -1057,6 +1724,14 @@ export function EchoSurface({
     primary.stop(now + duration + 0.05);
     secondary.stop(now + duration + 0.05);
     sub.stop(now + duration + 0.05);
+
+    if (role === "percussion") {
+      triggerNoiseBurst("percussion", 0.34 + accent * 0.4, hue);
+    }
+
+    if (role === "echo") {
+      triggerNoiseBurst("echo", 0.12 + accent * 0.12, hue);
+    }
   };
 
   const playChordPad = (chordSymbol: string, barNumber: number) => {
@@ -1108,42 +1783,70 @@ export function EchoSurface({
     const relativePoints = touch.points.map((current) =>
       point(current.x, current.y, current.t - touch.bornAt),
     );
-    const contourPoints = coerceContourPoints(relativePoints);
     const now = performance.now();
+    const gestureDurationMs = Math.max(now - touch.bornAt, pathDuration(relativePoints), 1);
+    const inferred = inferVoiceRole(
+      relativePoints,
+      gestureDurationMs,
+      simulationRef.current.recentGestures,
+    );
+    const role = inferred.role;
+    const contourPoints = shapePointsForRole(role, relativePoints, inferred.summary);
     const harmonic = harmonicStateRef.current;
     const currentBarIndex = getBarIndexAtTime(now, clockStartMsRef.current, harmonic);
     const nextBarStartMs =
       clockStartMsRef.current + (currentBarIndex + 1) * getBarMs(harmonic);
     const energy = clamp(0.42 + touch.travel * 1.4, 0.42, 1.2);
     const endPoint = contourPoints.at(-1) ?? averagePoint(contourPoints);
+    const roleHue = getLoopHue(role);
+
+    simulationRef.current.recentGestures = [
+      ...simulationRef.current.recentGestures,
+      {
+        timestamp: now,
+        centroid: inferred.summary.centroid,
+        durationMs: gestureDurationMs,
+        travel: inferred.summary.travel,
+        tapLike: inferred.summary.tapLike,
+        circularity: inferred.summary.circularity,
+        zigzag: inferred.summary.zigzag,
+      },
+    ].slice(-18);
 
     simulationRef.current.loops = [
       ...simulationRef.current.loops,
       createLoopRecord({
         id: loopIdRef.current++,
         bornAt: now,
-        hue: touch.hue,
+        role,
+        hue: roleHue,
         energy,
         points: contourPoints,
         scheduledAtMs: nextBarStartMs,
         synthetic: false,
+        clusterSize: inferred.summary.nearbyTapCount + 1,
       }),
     ].slice(-MAX_LOOPS);
 
     simulationRef.current.surfaceEnergy = clamp(
-      simulationRef.current.surfaceEnergy + 0.1 + energy * 0.08,
+      simulationRef.current.surfaceEnergy +
+        0.1 +
+        energy * 0.08 +
+        (role === "lead" || role === "percussion" ? 0.06 : 0),
       0.14,
       1.2,
     );
     lastInteractionAtRef.current = now;
 
-    pushFlash(endPoint, touch.hue, 0.84, "touch");
+    pushFlash(endPoint, role, roleHue, 0.84, "touch");
     playMelodicTone({
       midi: getPreviewMidi(endPoint, now),
-      hue: touch.hue,
-      accent: 0.76,
-      durationMs: getBeatMs(harmonic) * 0.72,
-      voice: "touch",
+      hue: roleHue,
+      accent: role === "bass" ? 0.92 : role === "percussion" ? 0.64 : 0.76,
+      durationMs:
+        getBeatMs(harmonic) *
+        (role === "pad" ? 1.1 : role === "bass" ? 1.4 : role === "percussion" ? 0.3 : 0.72),
+      voice: role === "percussion" ? "percussion" : role === "bass" ? "bass" : "touch",
     });
 
     syncMemory();
@@ -1163,6 +1866,7 @@ export function EchoSurface({
 
     simulationRef.current.loops = snapshot.loops;
     simulationRef.current.flashes = snapshot.flashes;
+    simulationRef.current.recentGestures = [];
     simulationRef.current.surfaceEnergy = 0.3;
     simulationRef.current.activeTouches.clear();
     loopIdRef.current = snapshot.loops.length;
@@ -1204,64 +1908,88 @@ export function EchoSurface({
     observer.observe(surface);
 
     const drawNoteGlyph = (
+      loop: ContourLoop,
       pointValue: NormalizedPoint,
       nextPoint: NormalizedPoint,
-      hue: number,
       active: boolean,
       note: PhraseNote,
+      cycleProgress: number,
+      now: number,
     ) => {
+      const warpedPoint = warpPointForRole(
+        pointValue,
+        nextPoint,
+        loop.role,
+        loop.motionSeed,
+        cycleProgress + note.stepIndex / Math.max(loop.noteCount, 1),
+        now,
+      );
+      const warpedNext = warpPointForRole(
+        nextPoint,
+        nextPoint,
+        loop.role,
+        loop.motionSeed,
+        cycleProgress + note.stepIndex / Math.max(loop.noteCount, 1) + 0.02,
+        now,
+      );
       const size = sizeRef.current;
-      const pixel = normalizedToPixels(pointValue, size);
-      const nextPixel = normalizedToPixels(nextPoint, size);
+      const pixel = normalizedToPixels(warpedPoint, size);
+      const nextPixel = normalizedToPixels(warpedNext, size);
       const angle = Math.atan2(nextPixel.y - pixel.y, nextPixel.x - pixel.x);
-      const glow = active ? 1 : 0.36;
-      const scale = 0.84 + note.accent * 0.42 + (active ? 0.28 : 0);
+      const glow = active ? 1 : note.trigger ? 0.5 : 0.24;
+      const radius = (note.chordTone ? 18 : 14) + note.accent * 12 + (active ? 6 : 0);
+      const halo = context.createRadialGradient(
+        pixel.x,
+        pixel.y,
+        0,
+        pixel.x,
+        pixel.y,
+        radius,
+      );
 
-      context.save();
-      context.translate(pixel.x, pixel.y);
-      context.rotate(angle);
-      context.globalCompositeOperation = "lighter";
-
-      const halo = context.createRadialGradient(0, 0, 0, 0, 0, 16 * scale);
-      halo.addColorStop(0, `hsla(${hue}, 100%, 84%, ${0.24 * glow})`);
-      halo.addColorStop(0.58, `hsla(${hue}, 92%, 66%, ${0.12 * glow})`);
-      halo.addColorStop(1, `hsla(${hue}, 92%, 60%, 0)`);
+      halo.addColorStop(0, getRoleColor(loop.role, 0.22 * glow, 16, 6));
+      halo.addColorStop(0.52, getRoleColor(loop.role, 0.1 * glow, 4, 2));
+      halo.addColorStop(1, getRoleColor(loop.role, 0, 0, 0));
       context.fillStyle = halo;
       context.beginPath();
-      context.arc(0, 0, 16 * scale, 0, TAU);
+      context.arc(pixel.x, pixel.y, radius, 0, TAU);
       context.fill();
 
-      context.fillStyle = `hsla(${hue}, 100%, 92%, ${0.68 + glow * 0.18})`;
-      context.beginPath();
-      context.ellipse(0, 0, 6 * scale, 4.6 * scale, -0.4, 0, TAU);
-      context.fill();
+      drawRoleGlyph(
+        context,
+        loop.role,
+        pixel.x,
+        pixel.y,
+        (note.trigger ? 5.2 : 4) + note.accent * 2 + (active ? 2.2 : 0),
+        0.42 + glow * 0.42,
+        angle,
+      );
 
-      if (!note.sustain) {
-        context.strokeStyle = `hsla(${hue}, 100%, 94%, ${0.58 + glow * 0.22})`;
-        context.lineWidth = 1.3;
-        context.beginPath();
-        context.moveTo(4.5 * scale, -1.5 * scale);
-        context.lineTo(4.5 * scale, -15 * scale);
-        context.stroke();
-      } else {
-        context.strokeStyle = `hsla(${hue}, 94%, 86%, ${0.42 + glow * 0.16})`;
-        context.lineWidth = 1.1;
-        context.beginPath();
-        context.moveTo(-8 * scale, 0);
-        context.lineTo(8 * scale, 0);
-        context.stroke();
-      }
-
-      if (note.chordTone) {
-        context.strokeStyle = `hsla(${hue}, 100%, 96%, ${0.56 + glow * 0.2})`;
+      if (active) {
+        context.strokeStyle = getRoleColor(loop.role, 0.52, 18, 4);
         context.lineWidth = 1;
         context.beginPath();
-        context.arc(0, 0, 8.5 * scale, 0, TAU);
+        context.arc(pixel.x, pixel.y, radius * 0.62, 0, TAU);
         context.stroke();
       }
-
-      context.restore();
     };
+
+    const warpPathForLoop = (
+      points: NormalizedPoint[],
+      loop: ContourLoop,
+      cycleProgress: number,
+      now: number,
+    ) =>
+      points.map((pointValue, index) =>
+        warpPointForRole(
+          pointValue,
+          points[Math.min(index + 1, points.length - 1)] ?? pointValue,
+          loop.role,
+          loop.motionSeed,
+          cycleProgress + index / Math.max(points.length - 1, 1),
+          now,
+        ),
+      );
 
     const frame = (now: number) => {
       const size = sizeRef.current;
@@ -1280,7 +2008,7 @@ export function EchoSurface({
       if (lastBarTriggerRef.current !== barNumber) {
         lastBarTriggerRef.current = barNumber;
         playChordPad(chordSymbol, barNumber);
-        pushFlash(point(0.5, 0.5, now), chordHue, 0.74, "bar");
+        pushFlash(point(0.5, 0.5, now), "pad", chordHue, 0.74, "bar");
       }
 
       const idleAge = now - lastInteractionAtRef.current;
@@ -1306,6 +2034,20 @@ export function EchoSurface({
       context.fillStyle = background;
       context.fillRect(0, 0, size.width, size.height);
 
+      const ritualCore = context.createRadialGradient(
+        size.width * 0.5,
+        size.height * 0.5,
+        0,
+        size.width * 0.5,
+        size.height * 0.5,
+        Math.max(size.width, size.height) * 0.62,
+      );
+      ritualCore.addColorStop(0, "rgba(248, 241, 228, 0.02)");
+      ritualCore.addColorStop(0.64, "rgba(248, 241, 228, 0.01)");
+      ritualCore.addColorStop(1, "rgba(248, 241, 228, 0)");
+      context.fillStyle = ritualCore;
+      context.fillRect(0, 0, size.width, size.height);
+
       const harmonicWash = context.createRadialGradient(
         size.width * 0.5,
         size.height * 0.48,
@@ -1326,23 +2068,40 @@ export function EchoSurface({
       context.fillStyle = harmonicWash;
       context.fillRect(0, 0, size.width, size.height);
 
-      for (let laneIndex = 1; laneIndex <= 6; laneIndex += 1) {
-        const y = (size.height / 7) * laneIndex;
-        context.strokeStyle = "rgba(239, 233, 221, 0.05)";
-        context.lineWidth = laneIndex === 3 || laneIndex === 4 ? 1.1 : 1;
+      for (let ringIndex = 1; ringIndex <= 5; ringIndex += 1) {
+        context.strokeStyle = "rgba(239, 233, 221, 0.04)";
+        context.lineWidth = ringIndex === 3 ? 1.2 : 1;
         context.beginPath();
-        context.moveTo(0, y);
-        context.lineTo(size.width, y);
+        context.arc(
+          size.width * 0.5,
+          size.height * 0.5,
+          Math.min(size.width, size.height) * (0.12 + ringIndex * 0.11),
+          0,
+          TAU,
+        );
         context.stroke();
       }
 
-      for (let barGuide = 0; barGuide <= 8; barGuide += 1) {
-        const x = (size.width / 8) * barGuide;
-        context.strokeStyle = "rgba(239, 233, 221, 0.03)";
+      for (let laneIndex = 1; laneIndex <= 5; laneIndex += 1) {
+        const y = (size.height / 6) * laneIndex;
+        context.strokeStyle = "rgba(239, 233, 221, 0.035)";
         context.lineWidth = 1;
         context.beginPath();
-        context.moveTo(x, 0);
-        context.lineTo(x, size.height);
+        context.moveTo(size.width * 0.08, y);
+        context.lineTo(size.width * 0.92, y);
+        context.stroke();
+      }
+
+      for (let spokeIndex = 0; spokeIndex < 12; spokeIndex += 1) {
+        const angle = (spokeIndex / 12) * TAU;
+        context.strokeStyle = "rgba(239, 233, 221, 0.024)";
+        context.lineWidth = 1;
+        context.beginPath();
+        context.moveTo(size.width * 0.5, size.height * 0.5);
+        context.lineTo(
+          size.width * 0.5 + Math.cos(angle) * size.width * 0.48,
+          size.height * 0.5 + Math.sin(angle) * size.height * 0.48,
+        );
         context.stroke();
       }
 
@@ -1380,38 +2139,70 @@ export function EchoSurface({
           radius,
         );
 
-        gradient.addColorStop(0, `hsla(${flash.hue}, 100%, 82%, ${alpha * 0.24})`);
-        gradient.addColorStop(0.54, `hsla(${flash.hue}, 92%, 62%, ${alpha * 0.1})`);
-        gradient.addColorStop(1, `hsla(${flash.hue}, 92%, 60%, 0)`);
+        gradient.addColorStop(
+          0,
+          flash.kind === "bar"
+            ? `hsla(${flash.hue}, 92%, 78%, ${alpha * 0.22})`
+            : getRoleColor(flash.role, alpha * 0.24, 14, 8),
+        );
+        gradient.addColorStop(
+          0.54,
+          flash.kind === "bar"
+            ? `hsla(${flash.hue}, 86%, 62%, ${alpha * 0.1})`
+            : getRoleColor(flash.role, alpha * 0.1, 0, 0),
+        );
+        gradient.addColorStop(1, getRoleColor(flash.role, 0, 0, 0));
 
         context.fillStyle = gradient;
         context.beginPath();
         context.arc(pixel.x, pixel.y, radius, 0, TAU);
         context.fill();
+
+        drawRoleGlyph(
+          context,
+          flash.role,
+          pixel.x,
+          pixel.y,
+          (flash.kind === "bar" ? 8.4 : 5.6) + flash.strength * 2.8,
+          alpha * (flash.kind === "bar" ? 0.9 : 1),
+          now * 0.0014,
+        );
       });
 
       state.loops.forEach((loop) => {
         const loopDurationMs = getBarMs(harmonic) * loop.loopBars;
+        const dormantPath = warpPathForLoop(loop.points, loop, barProgress * 0.22, now);
 
         context.save();
-        context.shadowBlur = 18 + loop.energy * 18;
-        context.shadowColor = `hsla(${loop.hue}, 92%, 72%, 0.16)`;
+        context.shadowBlur = 20 + loop.energy * 18;
+        context.shadowColor = getRoleColor(loop.role, 0.18, 8, 4);
         drawPolyline(
           context,
           size,
-          loop.points,
-          `hsla(${loop.hue}, 88%, 74%, ${0.08 + loop.energy * 0.08})`,
-          5.6,
+          dormantPath,
+          getRoleColor(loop.role, 0.08 + loop.energy * 0.08, 6, 4),
+          loop.role === "pad" ? 7.4 : loop.role === "bass" ? 6.4 : 4.8,
         );
         context.restore();
 
         drawPolyline(
           context,
           size,
-          loop.points,
-          `hsla(${loop.hue}, 88%, 72%, ${0.18 + loop.energy * 0.12})`,
-          2.1,
+          dormantPath,
+          getRoleColor(loop.role, 0.18 + loop.energy * 0.12, 12, 8),
+          loop.role === "percussion" ? 1.8 : 2.1,
         );
+
+        loop.anchors.forEach((anchor, index) => {
+          const note = loop.phraseNotes[index];
+          if (!note) {
+            return;
+          }
+
+          const nextAnchor =
+            loop.anchors[Math.min(index + 1, loop.anchors.length - 1)] ?? anchor;
+          drawNoteGlyph(loop, anchor.point, nextAnchor.point, false, note, barProgress * 0.2, now);
+        });
 
         if (now < loop.scheduledAtMs) {
           return;
@@ -1445,8 +2236,18 @@ export function EchoSurface({
           loop.lastTriggeredToken !== triggerToken
         ) {
           const anchor = loop.anchors[activeStepIndex];
+          const nextAnchor =
+            loop.anchors[Math.min(activeStepIndex + 1, loop.anchors.length - 1)] ?? anchor;
+          const flashedPoint = warpPointForRole(
+            anchor.point,
+            nextAnchor.point,
+            loop.role,
+            loop.motionSeed,
+            cycleProgress + anchor.drawRatio,
+            now,
+          );
           const noteHue = activeNote.chordTone
-            ? mix(loop.hue, chordHue, 0.34)
+            ? mix(loop.hue, chordHue, 0.18)
             : loop.hue;
           playMelodicTone({
             midi: activeNote.midi,
@@ -1456,47 +2257,80 @@ export function EchoSurface({
               (loopDurationMs / loop.noteCount) *
               Math.max(1, activeNote.gateSteps) *
               (activeNote.sustain ? 1.08 : 0.9),
-            voice: "lead",
+            voice: loop.role,
           });
-          pushFlash(anchor.point, noteHue, 0.62 + activeNote.accent * 0.22, "note");
+          pushFlash(
+            flashedPoint,
+            loop.role,
+            noteHue,
+            0.62 + activeNote.accent * 0.22,
+            "note",
+          );
           loop.lastTriggeredToken = triggerToken;
         }
 
-        const retracePath = buildPartialPath(loop.points, cycleProgress);
+        const retracePath = warpPathForLoop(
+          buildPartialPath(loop.points, cycleProgress),
+          loop,
+          cycleProgress,
+          now,
+        );
         context.save();
-        context.shadowBlur = 16 + loop.energy * 16;
-        context.shadowColor = `hsla(${mix(loop.hue, chordHue, 0.18)}, 96%, 78%, 0.24)`;
+        context.shadowBlur = 18 + loop.energy * 18;
+        context.shadowColor = getRoleColor(loop.role, 0.24, 18, 10);
         drawPolyline(
           context,
           size,
           retracePath,
-          `hsla(${mix(loop.hue, chordHue, 0.18)}, 100%, 86%, ${
-            0.28 + loop.energy * 0.16
-          })`,
-          3.4,
+          getRoleColor(loop.role, 0.28 + loop.energy * 0.16, 20, 12),
+          loop.role === "pad" ? 4.8 : loop.role === "bass" ? 4.2 : 3.4,
         );
         context.restore();
 
-        const head = samplePath(
+        const rawHead = samplePath(
           loop.points,
           pathDuration(loop.points) * cycleProgress,
         );
+        const rawHeadNext = samplePath(
+          loop.points,
+          pathDuration(loop.points) * Math.min(1, cycleProgress + 0.04),
+        );
+        const head = warpPointForRole(
+          rawHead,
+          rawHeadNext,
+          loop.role,
+          loop.motionSeed,
+          cycleProgress,
+          now,
+        );
         const headPixel = normalizedToPixels(head, size);
+        const headRadius =
+          loop.role === "pad" ? 34 : loop.role === "bass" ? 30 : loop.role === "echo" ? 32 : 26;
         const headGlow = context.createRadialGradient(
           headPixel.x,
           headPixel.y,
           0,
           headPixel.x,
           headPixel.y,
-          28,
+          headRadius,
         );
-        headGlow.addColorStop(0, `hsla(${mix(loop.hue, chordHue, 0.3)}, 100%, 86%, 0.48)`);
-        headGlow.addColorStop(0.56, `hsla(${mix(loop.hue, chordHue, 0.3)}, 92%, 64%, 0.16)`);
-        headGlow.addColorStop(1, `hsla(${mix(loop.hue, chordHue, 0.3)}, 92%, 60%, 0)`);
+        headGlow.addColorStop(0, getRoleColor(loop.role, 0.42, 18, 8));
+        headGlow.addColorStop(0.56, getRoleColor(loop.role, 0.16, 6, 2));
+        headGlow.addColorStop(1, getRoleColor(loop.role, 0, 0, 0));
         context.fillStyle = headGlow;
         context.beginPath();
-        context.arc(headPixel.x, headPixel.y, 28, 0, TAU);
+        context.arc(headPixel.x, headPixel.y, headRadius, 0, TAU);
         context.fill();
+
+        drawRoleGlyph(
+          context,
+          loop.role,
+          headPixel.x,
+          headPixel.y,
+          6.2 + (activeNote?.accent ?? 0.4) * 3.2,
+          0.88,
+          now * 0.0016,
+        );
 
         loop.anchors.forEach((anchor, index) => {
           const note = loop.phraseNotes[index];
@@ -1506,13 +2340,7 @@ export function EchoSurface({
 
           const nextAnchor =
             loop.anchors[Math.min(index + 1, loop.anchors.length - 1)] ?? anchor;
-          drawNoteGlyph(
-            anchor.point,
-            nextAnchor.point,
-            note.chordTone ? mix(loop.hue, chordHue, 0.28) : loop.hue,
-            index === activeStepIndex,
-            note,
-          );
+          drawNoteGlyph(loop, anchor.point, nextAnchor.point, index === activeStepIndex, note, cycleProgress, now);
         });
       });
 
@@ -1525,7 +2353,7 @@ export function EchoSurface({
           context,
           size,
           touch.points,
-          `hsla(${touch.hue}, 94%, 80%, 0.48)`,
+          `hsla(${touch.hue}, 94%, 80%, 0.4)`,
           3 + liveProgress * 2.2,
         );
         context.restore();
@@ -1589,7 +2417,7 @@ export function EchoSurface({
     });
     lastInteractionAtRef.current = now;
     syncActiveCount();
-    pushFlash(pointValue, hue, 0.62, "touch");
+    pushFlash(pointValue, "lead", hue, 0.62, "touch");
     playMelodicTone({
       midi: getPreviewMidi(pointValue, now),
       hue,
@@ -1653,6 +2481,7 @@ export function EchoSurface({
     simulationRef.current.activeTouches.clear();
     simulationRef.current.loops = [];
     simulationRef.current.flashes = [];
+    simulationRef.current.recentGestures = [];
     simulationRef.current.surfaceEnergy = 0.16;
     lastInteractionAtRef.current = performance.now();
     syncMemory();
@@ -1706,10 +2535,8 @@ export function EchoSurface({
             </div>
 
             <div className="surface-cockpit__readout">
-              <p>LOOPS x{memory.length}</p>
-              <p>BPM {harmonicState.bpm}</p>
-              <p>PROG {progressionLabel}</p>
-              <p>THESIS contour + harmony</p>
+              <p>Choir x{memory.length}</p>
+              <p>{ensembleLabel}</p>
             </div>
           </div>
 
