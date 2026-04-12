@@ -481,6 +481,23 @@ h2 {
   transform: scaleY(var(--chip-scale));
 }
 
+.memory-strip__chip[data-state="candidate"] {
+  opacity: 0.5;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.03),
+    0 0 10px hsla(var(--chip-hue), 82%, 64%, 0.14);
+}
+
+.memory-strip__chip[data-state="dormant"] {
+  opacity: 0.84;
+}
+
+.memory-strip__chip[data-state="awake"] {
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.08),
+    0 0 24px hsla(var(--chip-hue), 82%, 68%, 0.44);
+}
+
 .guide-board {
   padding: clamp(1rem, 2vw, 1.4rem);
 }

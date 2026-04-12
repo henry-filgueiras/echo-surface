@@ -4,6 +4,7 @@ import {
   type SceneName,
   type ScopeId,
   type ScopeRecord,
+  type SurfaceSize,
   PROGRESSION_OPTIONS,
 } from "../surface/model";
 
@@ -77,3 +78,12 @@ export const screenToWorld = (
   (screenNormY - 0.5) / camera.zoom + camera.viewCy,
 ];
 
+export const worldToScreenPixels = (
+  worldX: number,
+  worldY: number,
+  camera: CameraState,
+  size: SurfaceSize,
+): [number, number] => [
+  (worldX - camera.viewCx) * camera.zoom * size.width + size.width * 0.5,
+  (worldY - camera.viewCy) * camera.zoom * size.height + size.height * 0.5,
+];

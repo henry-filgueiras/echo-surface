@@ -8,6 +8,8 @@ EchoSurface is a playful touch-first prototype exploring the idea of the screen 
 
 The current prototype treats gesture shape as melodic intent while a shared harmonic state provides context. It also infers orchestration roles from the gesture itself, so the screen behaves more like a multi-voice ritual instrument than a menu-driven music toy.
 
+Repeated contour families now accumulate into session-memory motifs with their own sigils, so the instrument can remember shared musical history and let you wake those memories back into play.
+
 Part interaction experiment, part digital instrument, part sci-fi toy artifact.
 
 ## Run It
@@ -30,6 +32,8 @@ Then open the local Vite URL in a browser and play with the surface using mouse 
 - A subtle flow field gently encourages left-to-right motion, but backward drifts and loops remain playable and get interpreted musically as ornament, shimmer, or sustained echo instead of being blocked.
 - A subtle progression strip can retune the harmonic loop, and a one-shot role palette can seal the next contour to a specific voice when needed.
 - In call-and-response mode, a user contour can trigger a delayed answer phrase one bar later that keeps the contour family resemblance while shifting role, landing points, octave, and timing.
+- When related contours recur within the same scope, the session promotes them into named motif entities that store canonical shape, harmonic/rhythmic tendencies, preferred role, and a dormant sigil.
+- Zoomed-out scopes display dormant motif satellites that can be tapped to re-summon a phrase or dragged into another scope to reinterpret it under that local harmonic world.
 - Playback visibly retraces each contour with luminous transient glyphs at note events.
 
 ## Bootstrap

@@ -1,6 +1,14 @@
-import { TAU, VOICE_ROLE_STYLES, type SceneName, type VoiceRole } from "../surface/model";
+import {
+  TAU,
+  VOICE_ROLE_STYLES,
+  type MotifRhythmSkeleton,
+  type MotifSigil,
+  type SceneName,
+  type VoiceRole,
+} from "../surface/model";
 import { easeInOutSine, easeOutCubic } from "../surface/contour";
 import { noteNameToPitchClass } from "../music/engine";
+import { drawRoleGlyph, getRoleColor } from "./glyphs";
 
 export const bpmToSpokeCount = (bpm: number): number => {
   if (bpm < 75) return 3;
@@ -329,7 +337,119 @@ export const drawScopeSigil = (
   ctx.restore();
 };
 
+export const drawMotifSigil = ({
+  ctx,
+  cx,
+  cy,
+  radius,
+  hue,
+  role,
+  sigil,
+  rhythmSkeleton,
+  now,
+  alpha,
+  dormant = true,
+  highlight = 0,
+}: {
+  ctx: CanvasRenderingContext2D;
+  cx: number;
+  cy: number;
+  radius: number;
+  hue: number;
+  role: VoiceRole;
+  sigil: MotifSigil;
+  rhythmSkeleton: MotifRhythmSkeleton;
+  now: number;
+  alpha: number;
+  dormant?: boolean;
+  highlight?: number;
+}) => {
+  if (alpha < 0.01) {
+    return;
+  }
+
+  const pulse = dormant ? 0.12 + highlight * 0.18 : 0.26 + highlight * 0.26;
+  const rotation = (sigil.rotation / 180) * Math.PI + now * 0.00022;
+  const orbitRadius = radius * (1.18 + sigil.wave * 0.18);
+  const glow = radius * (1.8 + highlight * 0.28);
+  const halo = ctx.createRadialGradient(cx, cy, 0, cx, cy, glow);
+
+  halo.addColorStop(0, `hsla(${hue}, 88%, 84%, ${alpha * (0.16 + pulse * 0.36)})`);
+  halo.addColorStop(0.55, `hsla(${hue}, 72%, 64%, ${alpha * 0.08})`);
+  halo.addColorStop(1, `hsla(${hue}, 72%, 64%, 0)`);
+  ctx.fillStyle = halo;
+  ctx.beginPath();
+  ctx.arc(cx, cy, glow, 0, TAU);
+  ctx.fill();
+
+  for (let ringIndex = 0; ringIndex < sigil.ringCount; ringIndex += 1) {
+    const ringRadius = radius * (1 - ringIndex * 0.2);
+    ctx.beginPath();
+    ctx.arc(cx, cy, ringRadius, 0, TAU);
+    ctx.strokeStyle = `hsla(${hue}, 86%, 84%, ${alpha * (0.7 - ringIndex * 0.16)})`;
+    ctx.lineWidth = dormant ? 0.9 : 1.1;
+    ctx.setLineDash(dormant ? [3, 6] : [5, 5]);
+    ctx.lineDashOffset = -(now * 0.009) * (ringIndex % 2 === 0 ? 1 : -1);
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+
+  drawRegularPolygon(
+    ctx,
+    cx,
+    cy,
+    radius * 0.72,
+    sigil.polygonSides,
+    rotation - Math.PI / sigil.polygonSides,
+  );
+  ctx.strokeStyle = `hsla(${hue}, 92%, 88%, ${alpha * (0.74 + highlight * 0.18)})`;
+  ctx.lineWidth = dormant ? 0.95 : 1.2;
+  ctx.stroke();
+
+  for (let spokeIndex = 0; spokeIndex < sigil.spokeCount; spokeIndex += 1) {
+    const spokeAngle = rotation + (spokeIndex / sigil.spokeCount) * TAU;
+    const inner = radius * 0.18;
+    const outer = radius * 0.58;
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.cos(spokeAngle) * inner, cy + Math.sin(spokeAngle) * inner);
+    ctx.lineTo(cx + Math.cos(spokeAngle) * outer, cy + Math.sin(spokeAngle) * outer);
+    ctx.strokeStyle = `hsla(${hue}, 78%, 80%, ${alpha * 0.42})`;
+    ctx.lineWidth = 0.7;
+    ctx.stroke();
+  }
+
+  rhythmSkeleton.onsetRatios.forEach((ratio, index) => {
+    const angle = rotation + ratio * TAU;
+    const dotRadius = radius * (0.09 + (index % 2 === 0 ? 0.02 : 0));
+    const x = cx + Math.cos(angle) * orbitRadius;
+    const y = cy + Math.sin(angle) * orbitRadius;
+    ctx.beginPath();
+    ctx.arc(x, y, dotRadius, 0, TAU);
+    ctx.fillStyle = `hsla(${hue}, 96%, 90%, ${alpha * 0.78})`;
+    ctx.fill();
+    ctx.strokeStyle = getRoleColor(role, alpha * 0.3, 14, 6);
+    ctx.lineWidth = 0.7;
+    ctx.stroke();
+  });
+
+  drawRoleGlyph(
+    ctx,
+    role,
+    cx,
+    cy,
+    radius * 0.36 + highlight * 0.6,
+    alpha * (dormant ? 0.72 : 0.9),
+    rotation * 0.6,
+    undefined,
+    dormant && highlight < 0.08,
+  );
+
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius * 0.15, 0, TAU);
+  ctx.fillStyle = `hsla(${hue}, 100%, 94%, ${alpha * (0.78 + highlight * 0.12)})`;
+  ctx.fill();
+};
+
 // Zoom threshold below which sigil is fully visible, above which full scope shows
 export const SIGIL_ZOOM_FULL = 1.0;    // at this zoom and below → sigilWeight = 1
 export const SIGIL_ZOOM_FADE = 2.6;    // at this zoom and above → sigilWeight = 0
-

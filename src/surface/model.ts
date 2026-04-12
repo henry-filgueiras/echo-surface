@@ -154,6 +154,8 @@ export type ContourLoop = {
   loopiness: number;
   reversalRatio: number;
   forwardBias: number;
+  motifId?: number;
+  harmonicLandingBias?: number;
   /** ID of the scope this loop was created inside, null = root */
   scopeId: ScopeId | null;
 };
@@ -226,6 +228,85 @@ export type MemoryChip = {
   id: number;
   hue: number;
   role: VoiceRole;
+  state?: "candidate" | "dormant" | "awake";
+};
+
+export type MotifHarmonicTendencies = {
+  landingTone: 0 | 1 | 2;
+  modeAffinity: HarmonicState["mode"];
+  registerCenter: number;
+  chordToneBias: number;
+};
+
+export type MotifRhythmSkeleton = {
+  anchorRatios: number[];
+  onsetRatios: number[];
+  density: number;
+  quarterPulse: number;
+  syncopation: number;
+};
+
+export type MotifSigil = {
+  polygonSides: number;
+  ringCount: number;
+  spokeCount: number;
+  rotation: number;
+  wave: number;
+};
+
+export type MotifRecord = {
+  id: number;
+  name: string;
+  familyKey: string;
+  homeScopeId: ScopeId | null;
+  hue: number;
+  preferredRole: VoiceRole;
+  canonicalContour: NormalizedPoint[];
+  contourDurationMs: number;
+  harmonicTendencies: MotifHarmonicTendencies;
+  rhythmSkeleton: MotifRhythmSkeleton;
+  canonicalSigil: MotifSigil;
+  sightings: number;
+  awakenCount: number;
+  promoted: boolean;
+  bornAt: number;
+  lastSeenAt: number;
+  lastAwakenedAt: number | null;
+  loopIds: number[];
+};
+
+export type SessionMemorySummary = {
+  motifCount: number;
+  candidateCount: number;
+  awakenedCount: number;
+  names: string[];
+  roles: VoiceRole[];
+};
+
+export type RenderedMotifSatellite = {
+  motifId: number;
+  scopeId: ScopeId | null;
+  worldX: number;
+  worldY: number;
+  screenX: number;
+  screenY: number;
+  screenRadius: number;
+  alpha: number;
+  angle: number;
+};
+
+export type MotifDragState = {
+  pointerId: number;
+  motifId: number;
+  homeScopeId: ScopeId | null;
+  anchorAngle: number;
+  startScreenX: number;
+  startScreenY: number;
+  currentWorldX: number;
+  currentWorldY: number;
+  currentScreenX: number;
+  currentScreenY: number;
+  dragging: boolean;
 };
 
 export type ActiveLoopSnapshot = {
@@ -265,6 +346,10 @@ export const RHYTHM_TEMPLATE_RESOLUTION = 12;
 export const RHYTHM_PROXIMITY_THRESHOLD = 0.24;
 export const RHYTHM_ACTIVITY_LOOKAHEAD_BEATS = 0.5;
 export const LOWER_SILENCE_LANE_THRESHOLD = 0.84;
+export const MOTIF_PROMOTION_SIGHTINGS = 2;
+export const MOTIF_CONTOUR_SAMPLE_COUNT = 16;
+export const MOTIF_MAX_SATELLITES_PER_RING = 6;
+export const MOTIF_DRAG_THRESHOLD_PX = 12;
 export const NOTE_RANGE_MIN = 48;
 export const NOTE_RANGE_MAX = 88;
 export const QUARTER_NOTE_RATIOS = [0.25, 0.5, 0.75];

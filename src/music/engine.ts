@@ -1136,9 +1136,11 @@ export const createLoopRecord = ({
   clusterSize = 1,
   registerShift = 0,
   landingBias = 0,
+  harmonicLandingBias,
   rhythmField,
   summary,
   scopeId = null,
+  motifId,
 }: {
   id: number;
   bornAt: number;
@@ -1153,9 +1155,11 @@ export const createLoopRecord = ({
   clusterSize?: number;
   registerShift?: number;
   landingBias?: number;
+  harmonicLandingBias?: number;
   rhythmField?: RhythmAttractionField;
   summary?: GestureSummary;
   scopeId?: ScopeId | null;
+  motifId?: number;
 }): ContourLoop => {
   const contour = analyzeContour(points);
   const gestureSummary =
@@ -1183,11 +1187,13 @@ export const createLoopRecord = ({
     clusterSize,
     registerShift,
     landingBias,
+    harmonicLandingBias,
     rhythmField,
     circularity: gestureSummary.circularity,
     loopiness: gestureSummary.loopiness,
     reversalRatio: gestureSummary.reversalRatio,
     forwardBias: gestureSummary.forwardBias,
+    motifId,
     scopeId,
   };
 };

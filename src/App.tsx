@@ -16,7 +16,7 @@ const noteItems = [
   },
   {
     label: "Desired Feeling",
-    text: "The surface should read less like software and more like a ritual score: voices flicker into being, glyphs flare at note events, and the whole field feels slightly enchanted.",
+    text: "The surface should read less like software and more like a ritual score: voices flicker into being, motifs condense out of repeated phrase families, and dormant sigils make shared musical history feel present in the room.",
   },
 ];
 

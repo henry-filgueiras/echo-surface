@@ -20,6 +20,8 @@ import {
   MAX_FUSION_VOICES,
   MAX_LOOPS,
   MAX_POINTS_PER_GESTURE,
+  MOTIF_DRAG_THRESHOLD_PX,
+  MOTIF_MAX_SATELLITES_PER_RING,
   PROGRESSION_OPTIONS,
   SCENE_CONFIGS,
   SCENE_EARLY_TRIGGER_ENERGY,
@@ -56,13 +58,17 @@ import {
   type GestureSummary,
   type HarmonicState,
   type MemoryChip,
+  type MotifDragState,
+  type MotifRecord,
   type NormalizedPoint,
   type PhraseNote,
   type PinchTracker,
   type PlaybackFlash,
+  type RenderedMotifSatellite,
   type SceneName,
   type ScopeId,
   type ScopeRecord,
+  type SessionMemorySummary,
   type SimulationState,
   type SurfacePreset,
   type SurfaceSize,
@@ -129,7 +135,12 @@ import {
   findNearestPreferredChordToneIndex,
   midiToFrequency,
 } from "../music/engine";
-import { drawScopeSigil, SIGIL_ZOOM_FADE, SIGIL_ZOOM_FULL } from "../rendering/emitters";
+import {
+  drawMotifSigil,
+  drawScopeSigil,
+  SIGIL_ZOOM_FADE,
+  SIGIL_ZOOM_FULL,
+} from "../rendering/emitters";
 import {
   drawFusionGlyph,
   drawPolyline,
@@ -138,10 +149,21 @@ import {
   getRoleColor,
   warpPointForRole,
 } from "../rendering/glyphs";
-import { resolveEffectiveScopeContext, findScopeAt, screenToWorld } from "../world/scope";
 import {
+  resolveEffectiveScopeContext,
+  findScopeAt,
+  screenToWorld,
+  worldToScreenPixels,
+} from "../world/scope";
+import {
+  buildMotifFromLoop,
+  buildSessionMemorySummary,
+  findMotifMatch,
+  getPromotedMotifsForScope,
   getScopeActiveRoles,
   getScopeMotifDensity,
+  materializeMotifContour,
+  mergeLoopIntoMotif,
   projectMemoryChips,
 } from "../emergence/memory";
 
@@ -191,6 +213,10 @@ export function EchoSurface({
   // Scope / hierarchical composition space
   const scopeIdCounterRef = useRef(0);
   const scopesRef = useRef<ScopeRecord[]>([]);
+  const motifIdRef = useRef(0);
+  const motifsRef = useRef<MotifRecord[]>([]);
+  const motifSatellitesRef = useRef<RenderedMotifSatellite[]>([]);
+  const motifDragRef = useRef<MotifDragState | null>(null);
   const cameraRef = useRef<CameraState>({
     viewCx: 0.5, viewCy: 0.5, zoom: 1,
     targetViewCx: 0.5, targetViewCy: 0.5, targetZoom: 1,
@@ -199,6 +225,13 @@ export function EchoSurface({
   const pinchRef = useRef<PinchTracker>(null);
   const [harmonicState, setHarmonicState] = useState(DEFAULT_HARMONIC_STATE);
   const [memory, setMemory] = useState<MemoryChip[]>([]);
+  const [sessionMemory, setSessionMemory] = useState<SessionMemorySummary>({
+    motifCount: 0,
+    candidateCount: 0,
+    awakenedCount: 0,
+    names: [],
+    roles: [],
+  });
   const [activeCount, setActiveCount] = useState(0);
   const [isMuted, setIsMuted] = useState(false);
   const [progressionIndex, setProgressionIndex] = useState(0);
@@ -215,20 +248,39 @@ export function EchoSurface({
   );
   const keyLabel = `${harmonicState.tonic} ${harmonicState.mode}`;
   const ensembleLabel =
-    memory.length === 0
-      ? "voices awaken by gesture"
-      : Array.from(new Set(memory.map((chip) => chip.role))).join(" • ");
+    sessionMemory.motifCount === 0
+      ? sessionMemory.candidateCount > 0
+        ? "listening for contour kinship"
+        : "motifs form from repeated phrases"
+      : sessionMemory.names.length > 0
+        ? sessionMemory.names.join(" • ")
+        : "shared phrases orbit the field";
   const whisperLabel =
     activeCount > 0
       ? "soft lanes keep the choir legible • pauses bloom into rests • lower hold bass • mid-low drag pad • upper zigzag lead • top taps percussion"
-      : nextRoleOverride === "auto"
+      : sessionMemory.motifCount > 0
+        ? callResponseEnabled
+          ? "tap a dormant sigil to re-summon memory • drag it into another scope to reinterpret it • awakened motifs can answer back"
+          : "tap a dormant sigil to re-summon memory • drag it into another scope to reinterpret it"
+        : nextRoleOverride === "auto"
         ? callResponseEnabled
           ? "draw into the flow field, leave breathing gaps for silence, and let the surface answer one bar later"
           : "draw into the flow field, leave breathing gaps for rests, and overlap phrases for fusion"
         : `next contour sealed as ${formatVoiceRoleLabel(nextRoleOverride)}`;
 
   const syncMemory = () => {
-    setMemory(projectMemoryChips(simulationRef.current.loops));
+    setMemory(
+      projectMemoryChips({
+        motifs: motifsRef.current,
+        loops: simulationRef.current.loops,
+      }),
+    );
+    setSessionMemory(
+      buildSessionMemorySummary({
+        motifs: motifsRef.current,
+        loops: simulationRef.current.loops,
+      }),
+    );
   };
 
   const syncActiveCount = () => {
@@ -810,8 +862,9 @@ export function EchoSurface({
     pointValue: NormalizedPoint,
     timeMs: number,
     roleHint?: VoiceRole | null,
+    harmonicOverride?: HarmonicState,
   ) => {
-    const harmonic = harmonicStateRef.current;
+    const harmonic = harmonicOverride ?? harmonicStateRef.current;
     const barNumber = getBarNumberAtTime(timeMs, clockStartMsRef.current, harmonic);
     const chordSymbol = getChordForBar(barNumber, harmonic);
     const scale = buildExtendedScaleMidis(harmonic);
@@ -829,6 +882,196 @@ export function EchoSurface({
     const target = clamp(Math.round(78 - pointValue.y * 24 + roleOffset), 40, 88);
 
     return scale[findNearestChordToneIndex(scale, target, chordPitchClasses)];
+  };
+
+  const registerLoopInMotifMemory = ({
+    loop,
+    harmonic,
+    chordSymbol,
+    now,
+  }: {
+    loop: ContourLoop;
+    harmonic: HarmonicState;
+    chordSymbol: string;
+    now: number;
+  }) => {
+    if (loop.dialogueKind !== "source" || loop.answerToLoopId !== undefined) {
+      return loop;
+    }
+
+    const match: { motifId: number; score: number } | null = findMotifMatch({
+      motifs: motifsRef.current,
+      loop,
+      harmonicState: harmonic,
+      chordSymbol,
+    });
+
+    if (match) {
+      motifsRef.current = motifsRef.current.map((motif) =>
+        motif.id === match.motifId
+          ? mergeLoopIntoMotif({
+              motif,
+              loop,
+              harmonicState: harmonic,
+              chordSymbol,
+              now,
+            })
+          : motif,
+      );
+
+      return {
+        ...loop,
+        motifId: match.motifId,
+      };
+    }
+
+    const nextMotif = buildMotifFromLoop({
+      id: motifIdRef.current++,
+      loop,
+      harmonicState: harmonic,
+      chordSymbol,
+      now,
+      existingNames: motifsRef.current.map((motif) => motif.name),
+    });
+    motifsRef.current = [...motifsRef.current, nextMotif];
+
+    return {
+      ...loop,
+      motifId: nextMotif.id,
+    };
+  };
+
+  const awakenMotif = async ({
+    motifId,
+    targetScopeId,
+    center,
+  }: {
+    motifId: number;
+    targetScopeId: ScopeId | null;
+    center?: { x: number; y: number };
+  }) => {
+    const motif = motifsRef.current.find((candidate) => candidate.id === motifId);
+    if (!motif) {
+      return;
+    }
+
+    await ensureAudio();
+
+    const scope =
+      targetScopeId === null
+        ? null
+        : scopesRef.current.find((candidate) => candidate.id === targetScopeId) ?? null;
+    const { harmonic: effectiveHarmonic } = resolveEffectiveScopeContext(
+      targetScopeId,
+      scopesRef.current,
+      harmonicStateRef.current,
+      sceneNameRef.current,
+    );
+    const spawnCenter = center ?? {
+      x: scope?.cx ?? 0.5,
+      y: scope?.cy ?? 0.5,
+    };
+    const clampedCenter = {
+      x: clamp(spawnCenter.x, 0.08, 0.92),
+      y: clamp(spawnCenter.y, 0.08, 0.92),
+    };
+    const span = scope
+      ? Math.min(scope.rx, scope.ry) * 1.18
+      : motif.preferredRole === "bass"
+        ? 0.24
+        : motif.preferredRole === "pad"
+          ? 0.2
+          : 0.16;
+    const motifPoints = materializeMotifContour({
+      motif,
+      center: clampedCenter,
+      span,
+      scope,
+    });
+    const rhythmField = buildRhythmAttractionField({
+      points: motifPoints,
+      loops: simulationRef.current.loops,
+      harmonicState: effectiveHarmonic,
+      clockStartMs: clockStartMsRef.current,
+      referenceTimeMs: performance.now(),
+    });
+    const rhythmLockedPoints = applyRhythmAttractionToTimeline(motifPoints, rhythmField);
+    const motifSummary = summarizeGesture(
+      rhythmLockedPoints,
+      Math.max(pathDuration(rhythmLockedPoints), 1),
+      simulationRef.current.recentGestures,
+    );
+    const now = performance.now();
+    const currentBarIndex = getBarIndexAtTime(
+      now,
+      clockStartMsRef.current,
+      effectiveHarmonic,
+    );
+    const nextBarStartMs =
+      clockStartMsRef.current + (currentBarIndex + 1) * getBarMs(effectiveHarmonic);
+
+    const awakenedLoop = createLoopRecord({
+      id: loopIdRef.current++,
+      bornAt: now,
+      role: motif.preferredRole,
+      hue: motif.hue,
+      energy: 0.74 + motif.harmonicTendencies.chordToneBias * 0.22,
+      points: rhythmLockedPoints,
+      scheduledAtMs: nextBarStartMs,
+      synthetic: true,
+      clusterSize: motif.sightings,
+      landingBias: motif.harmonicTendencies.landingTone,
+      harmonicLandingBias: motif.harmonicTendencies.landingTone,
+      rhythmField,
+      summary: motifSummary,
+      scopeId: targetScopeId,
+      motifId,
+    });
+    const responseLoop =
+      callResponseEnabledRef.current && motif.preferredRole !== "percussion"
+        ? createResponseLoop(awakenedLoop, loopIdRef.current + Math.round(now))
+        : undefined;
+
+    simulationRef.current.loops = [
+      ...simulationRef.current.loops,
+      awakenedLoop,
+      ...(responseLoop ? [responseLoop] : []),
+    ].slice(-MAX_LOOPS);
+
+    if (scope) {
+      scope.loopIds.push(awakenedLoop.id);
+    }
+
+    motifsRef.current = motifsRef.current.map((candidate) =>
+      candidate.id === motifId
+        ? {
+            ...candidate,
+            awakenCount: candidate.awakenCount + 1,
+            lastAwakenedAt: now,
+            lastSeenAt: now,
+            loopIds: [...candidate.loopIds, awakenedLoop.id].slice(-12),
+          }
+        : candidate,
+    );
+
+    simulationRef.current.surfaceEnergy = clamp(
+      simulationRef.current.surfaceEnergy + 0.1 + motif.rhythmSkeleton.density * 0.08,
+      0.18,
+      1.2,
+    );
+    lastInteractionAtRef.current = now;
+    const endPoint = rhythmLockedPoints.at(-1) ?? averagePoint(rhythmLockedPoints);
+
+    pushFlash(endPoint, motif.preferredRole, motif.hue, 0.9, "touch");
+    playMelodicTone({
+      midi: getPreviewMidi(endPoint, now, motif.preferredRole, effectiveHarmonic),
+      hue: motif.hue,
+      accent: 0.72,
+      durationMs: getBeatMs(effectiveHarmonic) * 0.8,
+      voice: motif.preferredRole,
+    });
+
+    syncMemory();
   };
 
   // ---------------------------------------------------------------------------
@@ -909,7 +1152,12 @@ export function EchoSurface({
   // ---------------------------------------------------------------------------
 
   const createResponseLoop = (sourceLoop: ContourLoop, seed: number) => {
-    const harmonic = harmonicStateRef.current;
+    const { harmonic } = resolveEffectiveScopeContext(
+      sourceLoop.scopeId,
+      scopesRef.current,
+      harmonicStateRef.current,
+      sceneNameRef.current,
+    );
     const responseRole = getResponseRole(sourceLoop.role, seed);
     const baseResponsePoints = buildResponsePoints(
       sourceLoop.points,
@@ -962,6 +1210,7 @@ export function EchoSurface({
       landingBias,
       rhythmField: responseField,
       summary: responseSummary,
+      scopeId: sourceLoop.scopeId,
     });
   };
 
@@ -1027,7 +1276,7 @@ export function EchoSurface({
     const scopeForGesture = findScopeAt(
       gestureCentroid.x, gestureCentroid.y, scopesRef.current,
     );
-    const { harmonic: effectiveHarmonic } = resolveEffectiveScopeContext(
+    const { harmonic: effectiveHarmonic, scene: effectiveScene } = resolveEffectiveScopeContext(
       scopeForGesture?.id ?? null,
       scopesRef.current,
       harmonicStateRef.current,
@@ -1038,6 +1287,12 @@ export function EchoSurface({
     const currentBarIndex = getBarIndexAtTime(now, clockStartMsRef.current, harmonic);
     const nextBarStartMs =
       clockStartMsRef.current + (currentBarIndex + 1) * getBarMs(harmonic);
+    const scheduledBarNumber = getBarNumberAtTime(
+      nextBarStartMs,
+      clockStartMsRef.current,
+      harmonic,
+    );
+    const scheduledChord = getChordForBar(scheduledBarNumber, harmonic);
     const rhythmField = buildRhythmAttractionField({
       points: contourPoints,
       loops: simulationRef.current.loops,
@@ -1066,7 +1321,7 @@ export function EchoSurface({
       },
     ].slice(-18);
 
-    const sourceLoop = createLoopRecord({
+    let sourceLoop = createLoopRecord({
       id: loopIdRef.current++,
       bornAt: now,
       role,
@@ -1081,11 +1336,17 @@ export function EchoSurface({
       summary: inferred.summary,
       scopeId: scopeForGesture?.id ?? null,
     });
+    sourceLoop = registerLoopInMotifMemory({
+      loop: sourceLoop,
+      harmonic,
+      chordSymbol: scheduledChord,
+      now,
+    });
     // Register this loop inside its scope
     if (scopeForGesture) {
       scopeForGesture.loopIds.push(sourceLoop.id);
     }
-    const sceneVoiceWeight = SCENE_CONFIGS[sceneNameRef.current].voiceWeight;
+    const sceneVoiceWeight = SCENE_CONFIGS[effectiveScene].voiceWeight;
     const responseLoop =
       callResponseEnabledRef.current &&
       role !== "percussion" &&
@@ -1111,7 +1372,7 @@ export function EchoSurface({
 
     pushFlash(endPoint, role, roleHue, 0.84, "touch");
     playMelodicTone({
-      midi: getPreviewMidi(endPoint, now, role),
+      midi: getPreviewMidi(endPoint, now, role, harmonic),
       hue: roleHue,
       accent: role === "bass" ? 0.92 : role === "percussion" ? 0.64 : 0.76,
       durationMs:
@@ -1798,12 +2059,37 @@ export function EchoSurface({
       const activeLoopSnapshots: ActiveLoopSnapshot[] = [];
 
       state.loops.forEach((loop) => {
-        const loopDurationMs = getBarMs(harmonic) * loop.loopBars;
+        const loopContext = resolveEffectiveScopeContext(
+          loop.scopeId,
+          scopesRef.current,
+          harmonic,
+          sceneNameRef.current,
+        );
+        const loopHarmonic = loopContext.harmonic;
+        const loopScene = loopContext.scene;
+        const loopDurationMs = getBarMs(loopHarmonic) * loop.loopBars;
+        const loopBarNumber = getBarNumberAtTime(
+          now,
+          clockStartMsRef.current,
+          loopHarmonic,
+        );
+        const loopChordSymbol = getChordForBar(loopBarNumber, loopHarmonic);
+        const loopChordHue = getCurrentChordHue(loopHarmonic, loopChordSymbol);
+        const loopBarProgress = getBarProgressAtTime(
+          now,
+          clockStartMsRef.current,
+          loopHarmonic,
+        );
         const visualHue =
           loop.dialogueKind === "response"
             ? mix(loop.hue, RESPONSE_GLYPH_HUE, 0.6)
             : loop.hue;
-        const dormantPath = warpPathForLoop(loop.points, loop, barProgress * 0.22, now);
+        const dormantPath = warpPathForLoop(
+          loop.points,
+          loop,
+          loopBarProgress * 0.22,
+          now,
+        );
 
         context.save();
         context.shadowBlur = 20 + loop.energy * 18 + cadenceGlow * 10;
@@ -1846,9 +2132,9 @@ export function EchoSurface({
             nextAnchor.point,
             false,
             note,
-            barProgress * 0.2,
+            loopBarProgress * 0.2,
             now,
-            chordHue,
+            loopChordHue,
             glyphBoost,
           );
         });
@@ -1862,18 +2148,18 @@ export function EchoSurface({
         const cycleElapsed = elapsed - cycleIndex * loopDurationMs;
         const cycleProgress = clamp(cycleElapsed / loopDurationMs, 0, 0.9999);
         const cycleStartBar =
-          getBarNumberAtTime(loop.scheduledAtMs, clockStartMsRef.current, harmonic) +
+          getBarNumberAtTime(loop.scheduledAtMs, clockStartMsRef.current, loopHarmonic) +
           cycleIndex * loop.loopBars;
-        const cycleChord = getChordForBar(cycleStartBar, harmonic);
-        const phraseToken = `${cycleStartBar}:${cycleChord}:${harmonic.tonic}:${harmonic.mode}:${sceneNameRef.current}`;
+        const cycleChord = getChordForBar(cycleStartBar, loopHarmonic);
+        const phraseToken = `${cycleStartBar}:${cycleChord}:${loopHarmonic.tonic}:${loopHarmonic.mode}:${loopScene}`;
 
         if (loop.lastPhraseToken !== phraseToken) {
-          const phraseCfg = SCENE_CONFIGS[sceneNameRef.current];
+          const phraseCfg = SCENE_CONFIGS[loopScene];
           loop.phraseNotes = buildPhraseNotes(
             loop,
-            harmonic,
+            loopHarmonic,
             cycleChord,
-            phraseCfg.harmonicLandingTone,
+            loop.harmonicLandingBias ?? phraseCfg.harmonicLandingTone,
             phraseCfg.restBias,
           );
           loop.lastPhraseToken = phraseToken;
@@ -1901,8 +2187,8 @@ export function EchoSurface({
             now,
           );
           const noteHue = activeNote.chordTone
-            ? mix(getDialogueHue(loop, chordHue), chordHue, 0.18)
-            : getDialogueHue(loop, chordHue);
+            ? mix(getDialogueHue(loop, loopChordHue), loopChordHue, 0.18)
+            : getDialogueHue(loop, loopChordHue);
           playMelodicTone({
             midi: activeNote.midi,
             hue: noteHue,
@@ -2031,7 +2317,7 @@ export function EchoSurface({
             note,
             cycleProgress,
             now,
-            chordHue,
+            loopChordHue,
             glyphBoost,
           );
         });
@@ -2043,7 +2329,7 @@ export function EchoSurface({
           midi:
             activeNote && activeNote.kind !== "rest"
               ? activeNote.midi
-              : getPreviewMidi(head, now, loop.role),
+              : getPreviewMidi(head, now, loop.role, loopHarmonic),
           noteAccent: activeNote?.kind === "rest" ? 0.12 : activeNote?.accent ?? 0.54,
         });
       });
@@ -2267,6 +2553,103 @@ export function EchoSurface({
         1,
       );
       const fullScopeWeight = 1 - sigilWeight;
+      const renderedSatellites: RenderedMotifSatellite[] = [];
+
+      const renderMotifSatellites = ({
+        scopeId,
+        centerX,
+        centerY,
+        orbitBaseRadius,
+      }: {
+        scopeId: ScopeId | null;
+        centerX: number;
+        centerY: number;
+        orbitBaseRadius: number;
+      }) => {
+        if (sigilWeight < 0.08) {
+          return;
+        }
+
+        const motifs = getPromotedMotifsForScope(motifsRef.current, scopeId);
+        if (motifs.length === 0) {
+          return;
+        }
+
+        motifs.forEach((motif, index) => {
+          const ringIndex = Math.floor(index / MOTIF_MAX_SATELLITES_PER_RING);
+          const slotIndex = index % MOTIF_MAX_SATELLITES_PER_RING;
+          const slotsInRing = Math.min(
+            MOTIF_MAX_SATELLITES_PER_RING,
+            motifs.length - ringIndex * MOTIF_MAX_SATELLITES_PER_RING,
+          );
+          const baseAngle =
+            (slotIndex / Math.max(slotsInRing, 1)) * TAU +
+            motif.id * 0.23 +
+            ringIndex * 0.31;
+          const orbitAngle = baseAngle + now * 0.00006 * (ringIndex % 2 === 0 ? 1 : -1);
+          const orbitRadius = orbitBaseRadius + (24 + ringIndex * 22) / cam.zoom;
+          const radius =
+            (7.4 +
+              motif.rhythmSkeleton.density * 5.6 +
+              (motif.lastAwakenedAt && now - motif.lastAwakenedAt < 4200 ? 1.8 : 0)) /
+            cam.zoom;
+          const x = centerX + Math.cos(orbitAngle) * orbitRadius;
+          const y = centerY + Math.sin(orbitAngle) * orbitRadius;
+          const isDragging = motifDragRef.current?.motifId === motif.id;
+          const isAwake = simulationRef.current.loops.some((loop) => loop.motifId === motif.id);
+          const alpha =
+            sigilWeight *
+            (isDragging ? 0.92 : isAwake ? 0.8 : 0.62) *
+            (scopeId === cameraRef.current.focusScopeId ? 0.94 : 1);
+
+          context.beginPath();
+          context.moveTo(centerX, centerY);
+          context.lineTo(x, y);
+          context.strokeStyle = `hsla(${motif.hue}, 72%, 78%, ${alpha * 0.22})`;
+          context.lineWidth = 0.8 / cam.zoom;
+          context.setLineDash([3 / cam.zoom, 7 / cam.zoom]);
+          context.lineDashOffset = -(now * 0.01);
+          context.stroke();
+          context.setLineDash([]);
+
+          drawMotifSigil({
+            ctx: context,
+            cx: x,
+            cy: y,
+            radius,
+            hue: motif.hue,
+            role: motif.preferredRole,
+            sigil: motif.canonicalSigil,
+            rhythmSkeleton: motif.rhythmSkeleton,
+            now,
+            alpha,
+            dormant: !isDragging,
+            highlight: isAwake ? 0.26 : 0.08,
+          });
+
+          const worldX = x / size.width;
+          const worldY = y / size.height;
+          const [screenX, screenY] = worldToScreenPixels(worldX, worldY, cam, size);
+          renderedSatellites.push({
+            motifId: motif.id,
+            scopeId,
+            worldX,
+            worldY,
+            screenX,
+            screenY,
+            screenRadius: radius * cam.zoom * 1.22,
+            alpha,
+            angle: orbitAngle,
+          });
+        });
+      };
+
+      renderMotifSatellites({
+        scopeId: null,
+        centerX: size.width * 0.5,
+        centerY: size.height * 0.5,
+        orbitBaseRadius: Math.min(size.width, size.height) * 0.16,
+      });
 
       for (const scope of scopesRef.current) {
         const cx = scope.cx * size.width;
@@ -2342,6 +2725,13 @@ export function EchoSurface({
             context.fillText(scope.label.toUpperCase(), cx, cy + sigilR * 1.52);
             context.letterSpacing = "";
           }
+
+          renderMotifSatellites({
+            scopeId: scope.id,
+            centerX: cx,
+            centerY: cy,
+            orbitBaseRadius: sigilR * 1.3,
+          });
         }
 
         // ── Full scope layer (visible when zoomed in / focused) ────────────
@@ -2417,6 +2807,71 @@ export function EchoSurface({
 
         context.restore();
       }
+
+      motifSatellitesRef.current = renderedSatellites;
+
+      if (motifDragRef.current) {
+        const drag = motifDragRef.current;
+        const motif = motifsRef.current.find((candidate) => candidate.id === drag.motifId);
+        if (motif) {
+          const homeScope =
+            drag.homeScopeId === null
+              ? null
+              : scopesRef.current.find((candidate) => candidate.id === drag.homeScopeId) ?? null;
+          const homeX = (homeScope?.cx ?? 0.5) * size.width;
+          const homeY = (homeScope?.cy ?? 0.5) * size.height;
+          const dragX = drag.currentWorldX * size.width;
+          const dragY = drag.currentWorldY * size.height;
+
+          context.beginPath();
+          context.moveTo(homeX, homeY);
+          context.lineTo(dragX, dragY);
+          context.strokeStyle = `hsla(${motif.hue}, 88%, 82%, ${0.34 * sigilWeight})`;
+          context.lineWidth = 1.2 / cam.zoom;
+          context.setLineDash([6 / cam.zoom, 9 / cam.zoom]);
+          context.lineDashOffset = -(now * 0.016);
+          context.stroke();
+          context.setLineDash([]);
+
+          const targetScope =
+            findScopeAt(drag.currentWorldX, drag.currentWorldY, scopesRef.current) ??
+            homeScope;
+          const previewSpan = targetScope
+            ? Math.min(targetScope.rx, targetScope.ry) * 1.08
+            : motif.preferredRole === "bass"
+              ? 0.24
+              : 0.18;
+          const previewPoints = materializeMotifContour({
+            motif,
+            center: { x: drag.currentWorldX, y: drag.currentWorldY },
+            span: previewSpan,
+            scope: targetScope,
+          });
+
+          drawPolyline(
+            context,
+            size,
+            previewPoints,
+            `hsla(${motif.hue}, 92%, 84%, ${0.22 + sigilWeight * 0.18})`,
+            2.2 / cam.zoom,
+          );
+
+          drawMotifSigil({
+            ctx: context,
+            cx: dragX,
+            cy: dragY,
+            radius: 10 / cam.zoom,
+            hue: motif.hue,
+            role: motif.preferredRole,
+            sigil: motif.canonicalSigil,
+            rhythmSkeleton: motif.rhythmSkeleton,
+            now,
+            alpha: 0.96,
+            dormant: false,
+            highlight: 0.42,
+          });
+        }
+      }
       // ================================================================
       // end scope rendering
       // ================================================================
@@ -2450,6 +2905,20 @@ export function EchoSurface({
     };
   }, []);
 
+  const getMotifHit = (screenX: number, screenY: number) =>
+    [...motifSatellitesRef.current]
+      .reverse()
+      .find((satellite) => {
+        if (satellite.alpha < 0.08) {
+          return false;
+        }
+
+        return (
+          Math.hypot(screenX - satellite.screenX, screenY - satellite.screenY) <=
+          satellite.screenRadius
+        );
+      });
+
   const beginTouch = async (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.pointerType === "mouse" && event.button !== 0) {
       return;
@@ -2460,11 +2929,41 @@ export function EchoSurface({
       return;
     }
 
+    const bounds = surface.getBoundingClientRect();
+    const screenX = event.clientX - bounds.left;
+    const screenY = event.clientY - bounds.top;
+    const motifHit = getMotifHit(screenX, screenY);
+    if (motifHit) {
+      surface.setPointerCapture(event.pointerId);
+      motifDragRef.current = {
+        pointerId: event.pointerId,
+        motifId: motifHit.motifId,
+        homeScopeId: motifHit.scopeId,
+        anchorAngle: motifHit.angle,
+        startScreenX: screenX,
+        startScreenY: screenY,
+        currentWorldX: motifHit.worldX,
+        currentWorldY: motifHit.worldY,
+        currentScreenX: screenX,
+        currentScreenY: screenY,
+        dragging: false,
+      };
+      lastInteractionAtRef.current = performance.now();
+      return;
+    }
+
     surface.setPointerCapture(event.pointerId);
     await ensureAudio();
 
     const now = performance.now();
     const pointValue = makeSurfacePoint(event, surface, now, cameraRef.current);
+    const previewScope = findScopeAt(pointValue.x, pointValue.y, scopesRef.current);
+    const { harmonic: previewHarmonic } = resolveEffectiveScopeContext(
+      previewScope?.id ?? null,
+      scopesRef.current,
+      harmonicStateRef.current,
+      sceneNameRef.current,
+    );
     const previewRole =
       nextRoleOverrideRef.current === "auto" ? null : nextRoleOverrideRef.current;
     const hue = previewRole
@@ -2485,10 +2984,10 @@ export function EchoSurface({
     syncActiveCount();
     pushFlash(pointValue, previewRole ?? "lead", hue, 0.62, "touch");
     playMelodicTone({
-      midi: getPreviewMidi(pointValue, now, previewRole),
+      midi: getPreviewMidi(pointValue, now, previewRole, previewHarmonic),
       hue,
       accent: 0.44,
-      durationMs: getBeatMs(harmonicStateRef.current) * 0.34,
+      durationMs: getBeatMs(previewHarmonic) * 0.34,
       voice: previewRole ?? "touch",
     });
   };
@@ -2496,6 +2995,29 @@ export function EchoSurface({
   const moveTouch = (event: ReactPointerEvent<HTMLDivElement>) => {
     const surface = surfaceRef.current;
     if (!surface) {
+      return;
+    }
+
+    const motifDrag = motifDragRef.current;
+    if (motifDrag?.pointerId === event.pointerId) {
+      const bounds = surface.getBoundingClientRect();
+      const screenNormX = (event.clientX - bounds.left) / bounds.width;
+      const screenNormY = (event.clientY - bounds.top) / bounds.height;
+      const [worldX, worldY] = screenToWorld(screenNormX, screenNormY, cameraRef.current);
+      const screenX = event.clientX - bounds.left;
+      const screenY = event.clientY - bounds.top;
+      motifDrag.currentWorldX = worldX;
+      motifDrag.currentWorldY = worldY;
+      motifDrag.currentScreenX = screenX;
+      motifDrag.currentScreenY = screenY;
+      if (
+        !motifDrag.dragging &&
+        Math.hypot(screenX - motifDrag.startScreenX, screenY - motifDrag.startScreenY) >=
+          MOTIF_DRAG_THRESHOLD_PX
+      ) {
+        motifDrag.dragging = true;
+      }
+      lastInteractionAtRef.current = performance.now();
       return;
     }
 
@@ -2593,6 +3115,42 @@ export function EchoSurface({
   };
 
   const endTouch = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = motifDragRef.current;
+    if (drag?.pointerId === event.pointerId) {
+      const homeScope =
+        drag.homeScopeId === null
+          ? null
+          : scopesRef.current.find((scope) => scope.id === drag.homeScopeId) ?? null;
+      const releaseScope = findScopeAt(
+        drag.currentWorldX,
+        drag.currentWorldY,
+        scopesRef.current,
+      );
+      const targetScope = drag.dragging ? releaseScope : homeScope;
+      const center = drag.dragging
+        ? { x: drag.currentWorldX, y: drag.currentWorldY }
+        : targetScope
+          ? {
+              x: targetScope.cx + Math.cos(drag.anchorAngle) * targetScope.rx * 0.34,
+              y: targetScope.cy + Math.sin(drag.anchorAngle) * targetScope.ry * 0.34,
+            }
+          : {
+              x: 0.5 + Math.cos(drag.anchorAngle) * 0.12,
+              y: 0.5 + Math.sin(drag.anchorAngle) * 0.12,
+            };
+      motifDragRef.current = null;
+      void awakenMotif({
+        motifId: drag.motifId,
+        targetScopeId: targetScope?.id ?? null,
+        center,
+      });
+
+      if (surfaceRef.current?.hasPointerCapture(event.pointerId)) {
+        surfaceRef.current.releasePointerCapture(event.pointerId);
+      }
+      return;
+    }
+
     finalizeTouch(event.pointerId);
 
     if (surfaceRef.current?.hasPointerCapture(event.pointerId)) {
@@ -2601,6 +3159,14 @@ export function EchoSurface({
   };
 
   const cancelTouch = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (motifDragRef.current?.pointerId === event.pointerId) {
+      motifDragRef.current = null;
+      if (surfaceRef.current?.hasPointerCapture(event.pointerId)) {
+        surfaceRef.current.releasePointerCapture(event.pointerId);
+      }
+      return;
+    }
+
     finalizeTouch(event.pointerId);
 
     if (surfaceRef.current?.hasPointerCapture(event.pointerId)) {
@@ -2646,6 +3212,7 @@ export function EchoSurface({
     simulationRef.current.recentGestures = [];
     simulationRef.current.surfaceEnergy = 0.16;
     fusionCooldownRef.current.clear();
+    motifDragRef.current = null;
     lastInteractionAtRef.current = performance.now();
     syncMemory();
     syncActiveCount();
@@ -2718,14 +3285,22 @@ export function EchoSurface({
                         : undefined
                     }
                     data-filled={Boolean(chip)}
+                    data-state={chip?.state ?? "empty"}
                   />
                 );
               })}
             </div>
 
             <div className="surface-cockpit__readout">
-              <p>Choir x{memory.length}</p>
+              <p>Session motifs x{sessionMemory.motifCount}</p>
               <p>{ensembleLabel}</p>
+            </div>
+            <div className="surface-cockpit__badge">
+              {sessionMemory.awakenedCount > 0
+                ? `awake x${sessionMemory.awakenedCount}`
+                : sessionMemory.candidateCount > 0
+                  ? `forming x${sessionMemory.candidateCount}`
+                  : "listening"}
             </div>
           </div>
 

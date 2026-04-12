@@ -181,6 +181,8 @@ At the moment, EchoSurface is roughly:
 - a local rhythm-gravity field where nearby phrases can phase-lock softly
 - a dramaturgical form-engine with verse/chorus/bridge/drop scene arcs
 - a hierarchical composition space where scopes create local harmonic worlds
+- a session-memory layer where repeated contour families condense into named motifs
+- a satellite-sigil ecology where dormant memories can be reawakened or migrated
 
 It is not trying to be a DAW, piano roll, or synth workstation.
 
@@ -195,6 +197,10 @@ The magic seems strongest when the user feels:
 An additional feeling worth protecting now is:
 
 4. "The silences felt chosen."
+
+And now, a fifth:
+
+5. "The world remembered us."
 
 ### Phase 10: Scene Morphing — Macro Musical Form
 
@@ -218,6 +224,38 @@ The `phraseToken` now includes the scene name, so all active loops immediately r
 
 **Bonus: early transition.** If `surfaceEnergy ≥ 0.72`, `activeRoles ≥ 3`, and `recentGestures ≥ 3` within the last two bars, the system can skip ahead before the 8-bar window expires — jumping `verse → chorus` or `chorus → drop` in response to high interaction energy or phrase density. This makes the surface feel compositionally responsive to how intensely it is being played.
 
+### Phase 11: Motif Awakening And Session Memory
+
+The next real shift was giving the surface memory that could be played, not just observed.
+
+Contour phrases now get compared across the session. When enough of them repeat or cluster into the same recognizable family inside a parent scope, the system promotes them into a named motif entity rather than leaving them as unrelated loops.
+
+Each motif now preserves:
+
+- canonical contour shape
+- preferred voice role
+- harmonic tendencies
+- rhythm skeleton
+- canonical sigil
+
+This matters conceptually because EchoSurface should not only interpret a single gesture correctly. It should start to remember shared musical history and let that history become part of the instrument.
+
+The visual form of that memory is important. Promoted motifs appear as dormant satellite sigils orbiting their parent scope when zoomed out. That makes memory spatial instead of administrative:
+
+- the scope is the local harmonic world
+- the orbiting sigils are remembered phrase beings sleeping around it
+
+Interaction now supports two important acts:
+
+- tap a dormant sigil to re-summon the motif
+- drag it into another scope to reinterpret that same remembered contour under the destination scope's harmonic world
+
+That second behavior is the real unlock. A motif stops being a frozen preset and becomes migratory musical memory. Identity stays recognizable while meaning changes with context.
+
+Awakened motifs also participate in call-and-response. This was necessary. If the remembered material cannot enter the dialogue system, it is decorative memory instead of living memory.
+
+One subtle but crucial implementation consequence followed from this phase: scope-local harmonic worlds now need to matter during playback, not just at phrase birth. Reinterpretation only feels true if the same contour actually reharmonizes when it crosses into a new scope.
+
 ## Architectural Compaction Note
 
 1. **New module structure**
@@ -227,7 +265,7 @@ The `phraseToken` now includes the scene name, so all active loops immediately r
 - `src/rendering/glyphs.ts` now owns glyph drawing, role colour resolution, dialogue hue treatment, and loop warping.
 - `src/rendering/emitters.ts` now owns scope sigils and the zoom-threshold emitter/sigil blend.
 - `src/interaction/grammar.ts` now owns gesture summarization, role inference, gesture shaping, response-contour shaping, and pointer-to-surface coordinate capture.
-- `src/emergence/memory.ts` now owns projected memory chips plus scope-level motif density / active-role snapshots.
+- `src/emergence/memory.ts` now owns session-memory promotion, motif canonicalization, motif materialization, projected memory chips, and scope-level motif density / active-role snapshots.
 - `src/surface/model.ts` and `src/surface/contour.ts` became the substrate: shared ontology, role/style constants, and contour/time primitives used by every higher layer.
 
 2. **Concepts that emerged as first-class primitives**
@@ -236,7 +274,8 @@ The `phraseToken` now includes the scene name, so all active loops immediately r
 - `ScopeRecord` is no longer just a rendering overlay. It is a musical world with inherited overrides and camera semantics.
 - `GestureSummary` and contour utilities became a proper interaction grammar instead of hidden heuristics inside the component.
 - `PhraseNote`, `RhythmAttractionField`, and `FusionVoice` now read as music-engine primitives rather than incidental render-time data.
-- `MotifSnapshot` / memory projection is now an explicit emergence layer, which should make future motif recall and transformation work easier to add without touching rendering or input code first.
+- `MotifRecord` is now a first-class session-memory object rather than a vague future concept. That is important because recall, migration, and transformation all depend on it having real stored musical identity.
+- `MotifSnapshot` / memory projection remains the lightweight emergence read model sitting beside the fuller motif records.
 
 3. **Duplication and drift discovered**
 
@@ -524,7 +563,6 @@ That would make EchoSurface feel less ephemeral when desired, while preserving t
 
 - conductor gestures
 - long-form ritual states / scene evolution
-- phrase memory and motif awakening
 - persistent hybrid roles from repeated fusion pairings
 - harmony that responds to ensemble behavior
 

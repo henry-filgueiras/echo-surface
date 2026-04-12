@@ -11,13 +11,13 @@ const guideSteps = [
     title: "2. Let the rite unfold",
     image: withBase("guide/trace.png"),
     alt: "Screenshot of Echo Surface with several inferred voices weaving across the same harmonic field.",
-    text: "Harmony still moves underneath everything on a shared bar clock, a compact progression strip can steer the cycle, and call-and-response mode lets the surface answer a phrase one bar later with a related but transformed contour.",
+    text: "Harmony still moves underneath everything on a shared bar clock, a compact progression strip can steer the cycle, and call-and-response mode lets the surface answer a phrase one bar later with a related but transformed contour. When a contour family keeps returning, the session now promotes it into a named motif memory.",
   },
   {
     title: "3. Read the living score",
     image: withBase("guide/hold.png"),
     alt: "Screenshot of Echo Surface with playback retracing contours and transient glowing glyphs marking note events.",
-    text: "Playback retraces each stored path and throws off transient glyph flashes at note events, with a gentle left-to-right flow keeping phrases readable while loops, reversals, and circles still register musically as shimmer, ornament, and sustained echo.",
+    text: "Playback retraces each stored path and throws off transient glyph flashes at note events, with a gentle left-to-right flow keeping phrases readable while loops, reversals, and circles still register musically as shimmer, ornament, and sustained echo. Zoomed-out scopes now keep dormant motif sigils in orbit, ready to be tapped back into play or dragged into a new harmonic world.",
   },
 ];
 
@@ -29,8 +29,9 @@ export function HowToPlay() {
         <h2>How to play the instrument</h2>
         <p className="guide-board__lede">
           The surface now behaves like a small ceremonial ensemble. Gestures
-          infer orchestration roles, harmony supplies context, and the screen
-          responds like an illuminated score rather than a control panel.
+          infer orchestration roles, harmony supplies context, and repeated
+          phrase families condense into motif memory so the screen responds
+          like an illuminated score rather than a control panel.
         </p>
       </div>
 
