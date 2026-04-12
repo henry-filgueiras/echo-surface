@@ -99,6 +99,73 @@ Most recently, overlapping active phrases can now spawn a temporary fusion voice
 
 This is the first real sign that the system can generate ensemble interactions, not just independent voices sharing the same canvas.
 
+### Phase 7: Soft Spatial Readability
+
+One emerging problem was that once several roles were alive together, the surface could become beautiful but slightly difficult to parse. The answer was not to impose lanes as hard constraints. That would have damaged the instrument's sense of freedom.
+
+Instead, we introduced soft spatial preferences:
+
+- `bass` tends lower
+- `pad` tends mid-low
+- `lead` tends upper
+- `percussion` accents near the top
+- `echo` behaves more like an overlay field than a strict track
+
+This matters conceptually. The screen is not becoming a piano roll. It is becoming more legible in the same way an ensemble onstage is legible: voices occupy tendencies, not prison cells.
+
+Alongside the vertical tendency, we also added a subtle left-to-right flow field that gently encourages forward temporal motion. The key word is gently. Backward motion, circles, and local reversals are still allowed because they are musically meaningful:
+
+- loops -> trill / shimmer behavior
+- reversals -> syncopation / ornament
+- circles -> sustained echo
+
+This phase is easy to misunderstand if looked at only as implementation. It is not "constraint for order." It is "bias for readability."
+
+### Phase 8: Silence As A First-Class Event
+
+Another important shift was realizing that the system was still too eager to make everything speak all the time. Even with contour shaping, many phrase subdivisions were implicitly treated as note opportunities.
+
+That is not how living music breathes.
+
+So the phrase model now treats three states as primary:
+
+- `note`
+- `sustain`
+- `rest`
+
+This is not merely an audio detail. It changes the ontology of the score. Silence is now authored and rendered, not inferred after the fact as absence.
+
+Preferred interpretation became:
+
+- timing gaps between gesture segments can become rests
+- long flatter horizontal spans can become either sustain or silence
+- lower regions can softly encourage silence through a threshold bias
+
+Playback now shows rests as dim ghost placeholders or fading empty glyph spaces. This was important. If silence is musically real, it should also be visually real. The user should feel that the surface is choosing to breathe, not failing to fire.
+
+### Phase 9: Local Rhythm Gravity
+
+We then added proximity-based phrase locking, but in a very specific way: not as hard quantization, and not as a grid imposed from above.
+
+Instead, nearby active phrases now emit a soft rhythmic attraction field. When a new phrase is drawn near them, the system can:
+
+- gently align onset timing
+- bias local note spacing toward nearby rhythmic signatures
+- inherit some motif density when it helps the phrase belong
+- let response phrases phase-lock to nearby calls
+
+What matters is the constraint style. The contour is still the user's. The field is only there to make adjacent phrases feel socially aware of one another.
+
+This is especially important for cases like:
+
+- a nearby four-on-the-floor pulse softly attracting quarter-note feel
+- a nearby syncopated figure lending a timing skeleton without cloning itself
+- a response phrase feeling rhythmically related to the call without becoming a copy
+
+The principle is:
+
+`phrases near each other may rhyme in time, but they should not snap into sameness`
+
 ## What The Surface Is Now
 
 At the moment, EchoSurface is roughly:
@@ -109,6 +176,9 @@ At the moment, EchoSurface is roughly:
 - a lightly generative call-and-response system
 - a time-based climax engine with cadence events
 - an overlap-sensitive interaction field with fusion blooms
+- a soft-lane ensemble score with readable role geography
+- a phrase engine where silence and sustain are compositional material
+- a local rhythm-gravity field where nearby phrases can phase-lock softly
 
 It is not trying to be a DAW, piano roll, or synth workstation.
 
@@ -119,6 +189,10 @@ The magic seems strongest when the user feels:
 1. "I drew that."
 2. "The system understood the shape, not just the coordinates."
 3. "The world around it answered musically."
+
+An additional feeling worth protecting now is:
+
+4. "The silences felt chosen."
 
 ## Current Implementation Shape
 
@@ -138,6 +212,10 @@ Important systems already present in `EchoSurface.tsx`:
 - harmonic state and bar clock
 - contour analysis and phrase-note building
 - role inference from gesture summary
+- soft swim-lane bias and subtle forward flow shaping
+- proximity-based rhythm attraction and soft phrase locking
+- phrase-event classification into note / sustain / rest
+- anchor-timeline playback timing so gaps can remain musically meaningful
 - retrace playback and glyph rendering
 - call-and-response generation
 - cadence ritual events
@@ -152,8 +230,36 @@ This is powerful, but also means the main surface file is becoming the entire in
 - Keep controls subtle and peripheral.
 - Favor musical coherence over literal input mapping.
 - Favor beauty over realism.
+- Favor soft biases over hard rules.
+- Let readability emerge from tendencies, not locked tracks.
+- Treat silence as authored material, not missing output.
 - Let harmony contextualize gesture rather than dominate it.
+- Let nearby phrases influence one another through soft timing gravity, not hard snapping.
 - When adding a system, ask whether it feels like ritual behavior or app behavior.
+
+## New Heuristics Worth Remembering
+
+These are not sacred formulas, but they are part of the current aesthetic contract.
+
+### Spatial Heuristics
+
+- roles may prefer regions, but gestures should still be free to trespass
+- the `echo` voice should feel like a spectral overlay, not a lane-occupant in the usual sense
+- forward time should be visually encouraged, but never enforced so strongly that reverse or circular marks feel "wrong"
+
+### Phrase Heuristics
+
+- not every subdivision deserves a note
+- flatter motion can mean sustain, but it can also mean withholding
+- timing gaps are expressive and should survive interpretation when possible
+- nearby phrases may share pulse and density without sharing exact contour
+- if the system must choose between density and breath, breath is often the more musical choice
+
+### Visual Heuristics
+
+- a rest should read as present absence
+- the user should be able to see that a phrase contains space, not just hear it
+- placeholders for silence should stay subtle enough that the score remains luminous rather than diagrammatic
 
 ## Tensions To Watch
 
@@ -176,6 +282,14 @@ The canvas wants to stay sacred. Every new selector risks turning the spell circ
 ### 4. Generative Surprise vs User Ownership
 
 Responses, cadences, and fusion events are interesting only if the user still feels authorship.
+
+### 5. Readability vs Over-Scaffolding
+
+The new lanes and flow field help a lot, but they can be pushed too far. If every role becomes visually over-disciplined, the instrument stops feeling like drawing and starts feeling like sorting.
+
+### 6. Density vs Breath
+
+Now that rests are first-class, a new failure mode appears: over-correcting into emptiness or making the system feel hesitant. Silence should feel intentional and phrased, not timid.
 
 ## AI Pontification: Where I Think This Could Go
 
@@ -203,6 +317,7 @@ Possible behaviors:
 - a new contour can awaken an older contour variant
 - repeated motifs can become stronger "spells"
 - the surface can gradually ornament remembered phrases
+- the surface can remember where a phrase tends to leave silence, not just where it speaks
 - certain shapes can become recurring leitmotifs for a session
 
 This would make the instrument feel like it has memory, not just playback.
@@ -257,6 +372,19 @@ Possible next steps:
 - create a sense that some combinations are more alchemically compatible than others
 
 This is high potential territory.
+
+### Silence Rituals
+
+Now that silence exists as an event, there is a lot of room to make it more ceremonial rather than merely subtractive.
+
+Possible next steps:
+
+- let a phrase accumulate "rest gravity" so repeated quiet gestures hollow out space around them
+- let cadence moments briefly widen silence windows before the next arrival
+- create visible breath marks or evaporating sigils between separated note clusters
+- allow certain low, slow gestures to become near-silent conductorial marks rather than conventional voices
+
+This could become one of the more distinctive parts of the instrument if handled delicately.
 
 ### Spatial Composition
 

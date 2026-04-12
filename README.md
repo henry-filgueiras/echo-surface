@@ -26,6 +26,8 @@ Then open the local Vite URL in a browser and play with the surface using mouse 
 - Notes are quantized to the active scale instead of mapped directly to raw frequencies.
 - Stable landing points bias toward active chord tones as the progression cycles.
 - Long smooth drags become pads, long holds become bass drones, clustered taps wake percussion, sharp zigzags become leads, and circular motion opens echo or FX voices.
+- Each inferred role now prefers a soft swim lane for readability: bass lower, pads mid-low, leads upper, percussion near the top, and echo floating as an overlay rather than a hard band.
+- A subtle flow field gently encourages left-to-right motion, but backward drifts and loops remain playable and get interpreted musically as ornament, shimmer, or sustained echo instead of being blocked.
 - A subtle progression strip can retune the harmonic loop, and a one-shot role palette can seal the next contour to a specific voice when needed.
 - In call-and-response mode, a user contour can trigger a delayed answer phrase one bar later that keeps the contour family resemblance while shifting role, landing points, octave, and timing.
 - Playback visibly retraces each contour with luminous transient glyphs at note events.

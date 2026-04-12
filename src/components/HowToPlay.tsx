@@ -5,7 +5,7 @@ const guideSteps = [
     title: "1. Summon a voice",
     image: withBase("guide/seed.png"),
     alt: "Screenshot of Echo Surface showing luminous role-colored phrases suspended over a ritual-like score.",
-    text: "The surface infers role from gesture by default. Long smooth drags feel like pads, long holds become bass, clustered taps read as percussion, zigzags turn into leads, and circles wake echo voices. A tiny role seal can override just the next contour when you want to place a voice deliberately.",
+    text: "The surface infers role from gesture by default. Long smooth drags feel like pads, long holds become bass, clustered taps read as percussion, zigzags turn into leads, and circles wake echo voices. Each role now leans toward a soft visual lane so the ensemble reads clearly without locking your hand in place.",
   },
   {
     title: "2. Let the rite unfold",
@@ -17,7 +17,7 @@ const guideSteps = [
     title: "3. Read the living score",
     image: withBase("guide/hold.png"),
     alt: "Screenshot of Echo Surface with playback retracing contours and transient glowing glyphs marking note events.",
-    text: "Playback retraces each stored path and throws off transient glyph flashes at note events, so the surface feels like a magical score writing and performing itself in real time.",
+    text: "Playback retraces each stored path and throws off transient glyph flashes at note events, with a gentle left-to-right flow keeping phrases readable while loops, reversals, and circles still register musically as shimmer, ornament, and sustained echo.",
   },
 ];
 

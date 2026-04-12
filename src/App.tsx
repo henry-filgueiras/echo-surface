@@ -12,7 +12,7 @@ const noteItems = [
   },
   {
     label: "Voice Inference",
-    text: "Long smooth drags bloom into pads, long holds become bass drones, clustered taps wake percussion, sharp zigzags summon leads, and circles open echo voices.",
+    text: "Long smooth drags bloom into pads, long holds become bass drones, clustered taps wake percussion, sharp zigzags summon leads, and circles open echo voices, with each role now tending toward its own soft swim lane.",
   },
   {
     label: "Desired Feeling",
