@@ -2,3 +2,7 @@ node_modules
 dist
 bazel-*
 *.tsbuildinfo
+
+# Zoom test tooling (puppeteer, installed on demand)
+test-tools/
+test-output/

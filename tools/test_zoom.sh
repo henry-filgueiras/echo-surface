@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
 # tools/test_zoom.sh
 #
-# Builds a production preview, starts it locally, runs the puppeteer
-# zoom smoke-test, then tears the preview server down.
-#
-# Prerequisites (installed by bootstrap.sh / npm ci):
-#   - node + npm
-#   - puppeteer (devDependency → installed via npm ci)
+# Zoom smoke-test for EchoSurface.
+# Puppeteer is installed on-demand into test-tools/ so it never
+# touches the main node_modules or package-lock.json, and it is
+# never pulled into the Docker build image.
 #
 # Usage:
-#   npm run test:zoom
-#   bash tools/test_zoom.sh
-#   bash tools/test_zoom.sh http://localhost:8080   # test against running docker
+#   npm run test:zoom                        # build preview, run test
+#   bash tools/test_zoom.sh                  # same
+#   bash tools/test_zoom.sh http://localhost:8080  # test against running docker
 
 set -euo pipefail
 
@@ -19,28 +17,37 @@ cd "${BUILD_WORKSPACE_DIRECTORY:-$(pwd)}"
 
 TARGET_URL="${1:-}"
 
+# ── Ensure puppeteer is available in test-tools/ ───────────────────────────
+TEST_DIR="test-tools"
+if [[ ! -d "$TEST_DIR/node_modules/puppeteer" ]]; then
+  echo "Installing puppeteer into $TEST_DIR/ (one-time, not part of the main build)..."
+  mkdir -p "$TEST_DIR"
+  # Write a minimal package.json if one doesn't exist yet
+  if [[ ! -f "$TEST_DIR/package.json" ]]; then
+    echo '{"name":"echo-surface-tests","private":true,"type":"commonjs"}' > "$TEST_DIR/package.json"
+  fi
+  npm install --prefix "$TEST_DIR" puppeteer
+  echo "Puppeteer installed."
+fi
+
+# ── If a URL was supplied, run against it directly ─────────────────────────
 if [[ -n "$TARGET_URL" ]]; then
   echo "Running zoom test against existing server: $TARGET_URL"
-  node tools/test_zoom.js "$TARGET_URL"
+  node --experimental-vm-modules tools/test_zoom.js "$TARGET_URL"
   exit $?
 fi
 
-# ── No URL given: build + preview ──────────────────────────────────────────
+# ── Otherwise build + preview ──────────────────────────────────────────────
 
-if [[ ! -d node_modules ]] || [[ ! -d node_modules/puppeteer ]]; then
-  echo "Installing dependencies (including puppeteer)..."
-  # Use npm install rather than npm ci so puppeteer resolves even if
-  # package-lock.json was generated before it was added to devDependencies.
-  npm install
+if [[ ! -d node_modules ]]; then
+  echo "Installing project dependencies..."
+  npm ci
 fi
-
-# Ensure puppeteer's bundled browser is downloaded
-npx puppeteer browsers install chrome 2>/dev/null || true
 
 echo "Building for preview..."
 VITE_BASE_PATH=/ npm run build >/tmp/echo-surface-test-build.log 2>&1
 
-echo "Starting preview server..."
+echo "Starting preview server on port 4174..."
 npx vite preview --host 127.0.0.1 --port 4174 >/tmp/echo-surface-test-preview.log 2>&1 &
 preview_pid=$!
 
@@ -50,7 +57,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Wait for preview to be ready
 echo "Waiting for preview server..."
 for _ in $(seq 1 30); do
   if curl -fsS "http://127.0.0.1:4174/" >/dev/null 2>&1; then

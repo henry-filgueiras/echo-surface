@@ -18,9 +18,18 @@
  * Exit code 1 = at least one assertion failed (details printed to stderr).
  */
 
-import puppeteer from "puppeteer";
-import { writeFileSync, mkdirSync } from "fs";
-import { join } from "path";
+// Puppeteer lives in test-tools/node_modules, not the main node_modules,
+// so it never ends up in the Docker build. Resolve it explicitly.
+import { createRequire } from "module";
+import { fileURLToPath } from "url";
+import { join, dirname, resolve } from "path";
+import { mkdirSync } from "fs";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const testToolsResolve = createRequire(
+  resolve(__dirname, "..", "test-tools", "package.json"),
+);
+const puppeteer = (await import(testToolsResolve.resolve("puppeteer"))).default;
 
 const BASE_URL = process.argv[2] ?? "http://127.0.0.1:4173";
 const OUT_DIR = "test-output/zoom";

@@ -63,13 +63,6 @@ if [[ -f package-lock.json ]]; then
   npm ci
 fi
 
-# Download puppeteer's bundled Chromium (needed by npm run test:zoom).
-# This is a no-op if the browser is already cached.
-if command -v npx >/dev/null 2>&1; then
-  echo "Ensuring puppeteer browser is available..."
-  npx puppeteer browsers install chrome 2>/dev/null || true
-fi
-
 if ! docker info >/dev/null 2>&1; then
   echo "Docker Desktop is installed but the daemon is not running yet." >&2
   echo "Launch Docker.app once before using bazel run //:docker_up." >&2
