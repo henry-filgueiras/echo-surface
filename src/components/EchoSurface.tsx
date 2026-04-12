@@ -128,6 +128,15 @@ type PlaybackFlash = {
   kind: "touch" | "note" | "bar";
 };
 
+type CadenceEvent = {
+  id: number;
+  bornAt: number;
+  ttl: number;
+  barNumber: number;
+  hue: number;
+  intensity: number;
+};
+
 type AudioEngine = {
   context: AudioContext | null;
   compressor: DynamicsCompressorNode | null;
@@ -143,6 +152,7 @@ type SimulationState = {
   loops: ContourLoop[];
   flashes: PlaybackFlash[];
   recentGestures: RecentGesture[];
+  cadenceEvents: CadenceEvent[];
   surfaceEnergy: number;
 };
 
@@ -170,6 +180,8 @@ const SURFACE_PRESETS: SurfacePreset[] = ["seed", "trace", "hold"];
 const LOOP_BARS = 1;
 const BEATS_PER_BAR = 4;
 const IDLE_PAD_AFTER_MS = 1200;
+const CADENCE_BAR_INTERVAL = 8;
+const CADENCE_TTL_MS = 2400;
 const NOTE_RANGE_MIN = 48;
 const NOTE_RANGE_MAX = 88;
 const NOTE_NAMES = [
@@ -1550,6 +1562,7 @@ const createPresetState = (
           kind: "note" as const,
         },
       ],
+      cadenceEvents: [],
     };
   }
 
@@ -1584,6 +1597,7 @@ const createPresetState = (
         ),
       ],
       flashes: [],
+      cadenceEvents: [],
     };
   }
 
@@ -1617,6 +1631,7 @@ const createPresetState = (
       ),
     ],
     flashes: [],
+    cadenceEvents: [],
   };
 };
 
@@ -1642,6 +1657,7 @@ export function EchoSurface({
     loops: [],
     flashes: [],
     recentGestures: [],
+    cadenceEvents: [],
     surfaceEnergy: 0.18,
   });
   const harmonicStateRef = useRef<HarmonicState>(DEFAULT_HARMONIC_STATE);
@@ -1650,6 +1666,7 @@ export function EchoSurface({
   const lastInteractionAtRef = useRef(performance.now());
   const flashIdRef = useRef(0);
   const loopIdRef = useRef(0);
+  const cadenceIdRef = useRef(0);
   const nextRoleOverrideRef = useRef<VoiceRoleOverride>("auto");
   const callResponseEnabledRef = useRef(true);
   const [harmonicState, setHarmonicState] = useState(DEFAULT_HARMONIC_STATE);
@@ -1999,6 +2016,58 @@ export function EchoSurface({
     });
   };
 
+  const playCadenceResolution = () => {
+    const engine = soundRef.current;
+    if (!engine.context || engine.muted) {
+      return;
+    }
+
+    const harmonic = harmonicStateRef.current;
+    const scale = buildExtendedScaleMidis(harmonic, 36, 84);
+    const tonicChordPitchClasses = getChordPitchClasses(harmonic, "I");
+    const targets = [40, 52, 59, 64];
+
+    targets.forEach((target, index) => {
+      const chordIndex = findNearestPreferredChordToneIndex(
+        scale,
+        target,
+        tonicChordPitchClasses,
+        index === 0 ? 0 : index === 1 ? 1 : 2,
+      );
+      playMelodicTone({
+        midi: scale[chordIndex] + (index >= 2 ? 12 : 0),
+        hue: getCurrentChordHue(harmonic, "I"),
+        accent: index === 0 ? 1 : 0.88 - index * 0.08,
+        durationMs: getBarMs(harmonic) * (index === 0 ? 1.3 : 1.08),
+        voice: index === 0 ? "bass" : "pad",
+      });
+    });
+  };
+
+  const triggerCadenceEvent = (barNumber: number, intensity: number) => {
+    const harmonic = harmonicStateRef.current;
+    const hue = getCurrentChordHue(harmonic, "I");
+
+    simulationRef.current.cadenceEvents.push({
+      id: cadenceIdRef.current++,
+      bornAt: performance.now(),
+      ttl: CADENCE_TTL_MS,
+      barNumber,
+      hue,
+      intensity,
+    });
+
+    if (simulationRef.current.cadenceEvents.length > 2) {
+      simulationRef.current.cadenceEvents.splice(
+        0,
+        simulationRef.current.cadenceEvents.length - 2,
+      );
+    }
+
+    pushFlash(point(0.5, 0.5, performance.now()), "pad", hue, 1.25, "bar");
+    playCadenceResolution();
+  };
+
   const getPreviewMidi = (
     pointValue: NormalizedPoint,
     timeMs: number,
@@ -2175,6 +2244,7 @@ export function EchoSurface({
 
     simulationRef.current.loops = snapshot.loops;
     simulationRef.current.flashes = snapshot.flashes;
+    simulationRef.current.cadenceEvents = snapshot.cadenceEvents;
     simulationRef.current.recentGestures = [];
     simulationRef.current.surfaceEnergy = 0.3;
     simulationRef.current.activeTouches.clear();
@@ -2225,6 +2295,7 @@ export function EchoSurface({
       cycleProgress: number,
       now: number,
       chordHue: number,
+      glyphBoost: number,
     ) => {
       const warpedPoint = warpPointForRole(
         pointValue,
@@ -2246,8 +2317,9 @@ export function EchoSurface({
       const pixel = normalizedToPixels(warpedPoint, size);
       const nextPixel = normalizedToPixels(warpedNext, size);
       const angle = Math.atan2(nextPixel.y - pixel.y, nextPixel.x - pixel.x);
-      const glow = active ? 1 : note.trigger ? 0.5 : 0.24;
-      const radius = (note.chordTone ? 18 : 14) + note.accent * 12 + (active ? 6 : 0);
+      const glow = (active ? 1 : note.trigger ? 0.5 : 0.24) * glyphBoost;
+      const radius =
+        (note.chordTone ? 18 : 14) + note.accent * 12 + (active ? 6 : 0) + (glyphBoost - 1) * 8;
       const glyphHue = getDialogueHue(loop, chordHue);
       const halo = context.createRadialGradient(
         pixel.x,
@@ -2326,6 +2398,15 @@ export function EchoSurface({
       const chordSymbol = getChordForBar(barNumber, harmonic);
       const chordHue = getCurrentChordHue(harmonic, chordSymbol);
       const barProgress = getBarProgressAtTime(now, clockStartMsRef.current, harmonic);
+      const activeRoles = new Set(
+        state.loops
+          .filter((loop) => now >= loop.scheduledAtMs)
+          .map((loop) => loop.role),
+      );
+      const cadenceShouldTrigger =
+        barNumber > 0 &&
+        barNumber % CADENCE_BAR_INTERVAL === 0 &&
+        activeRoles.size > 1;
 
       if (barNumber !== harmonic.currentBar) {
         harmonic.currentBar = barNumber;
@@ -2336,6 +2417,12 @@ export function EchoSurface({
         lastBarTriggerRef.current = barNumber;
         playChordPad(chordSymbol, barNumber);
         pushFlash(point(0.5, 0.5, now), "pad", chordHue, 0.74, "bar");
+        if (cadenceShouldTrigger) {
+          triggerCadenceEvent(
+            barNumber,
+            clamp(0.74 + activeRoles.size * 0.12, 0.74, 1.28),
+          );
+        }
       }
 
       const idleAge = now - lastInteractionAtRef.current;
@@ -2345,12 +2432,23 @@ export function EchoSurface({
           0.16 +
             state.loops.length * 0.05 +
             state.activeTouches.size * 0.16 +
+            (cadenceShouldTrigger ? 0.08 : 0) +
             (idleAge < IDLE_PAD_AFTER_MS ? 0.08 : 0),
           0.16,
           1,
         ),
         0.04,
       );
+
+      state.cadenceEvents = state.cadenceEvents.filter(
+        (event) => now - event.bornAt < event.ttl,
+      );
+      const cadenceGlow = state.cadenceEvents.reduce((strongest, event) => {
+        const age = now - event.bornAt;
+        const progress = clamp(age / event.ttl, 0, 1);
+        const intensity = event.intensity * (1 - progress) ** 0.5;
+        return Math.max(strongest, intensity);
+      }, 0);
 
       context.clearRect(0, 0, size.width, size.height);
 
@@ -2385,11 +2483,13 @@ export function EchoSurface({
       );
       harmonicWash.addColorStop(
         0,
-        `hsla(${chordHue}, 92%, 68%, ${0.08 + state.surfaceEnergy * 0.08})`,
+        `hsla(${chordHue}, 92%, 68%, ${
+          0.08 + state.surfaceEnergy * 0.08 + cadenceGlow * 0.04
+        })`,
       );
       harmonicWash.addColorStop(
         0.58,
-        `rgba(109, 209, 200, ${0.03 + state.surfaceEnergy * 0.03})`,
+        `rgba(109, 209, 200, ${0.03 + state.surfaceEnergy * 0.03 + cadenceGlow * 0.02})`,
       );
       harmonicWash.addColorStop(1, "rgba(4, 17, 23, 0)");
       context.fillStyle = harmonicWash;
@@ -2445,6 +2545,87 @@ export function EchoSurface({
       context.fillStyle = sweep;
       context.fillRect(sweepX - 90, 0, 180, size.height);
 
+      state.cadenceEvents.forEach((event) => {
+        const age = now - event.bornAt;
+        const progress = clamp(age / event.ttl, 0, 1);
+        const bloomRadius =
+          Math.min(size.width, size.height) *
+          (0.12 + event.intensity * 0.16 + easeOutCubic(progress) * 0.62);
+        const bloom = context.createRadialGradient(
+          size.width * 0.5,
+          size.height * 0.5,
+          0,
+          size.width * 0.5,
+          size.height * 0.5,
+          bloomRadius,
+        );
+
+        bloom.addColorStop(
+          0,
+          `hsla(${event.hue}, 96%, 86%, ${(1 - progress) * 0.12 * event.intensity})`,
+        );
+        bloom.addColorStop(
+          0.46,
+          `hsla(${event.hue}, 88%, 72%, ${(1 - progress) * 0.06 * event.intensity})`,
+        );
+        bloom.addColorStop(1, `hsla(${event.hue}, 82%, 68%, 0)`);
+        context.fillStyle = bloom;
+        context.fillRect(0, 0, size.width, size.height);
+
+        const sigilAlpha = (1 - progress) * (0.24 + event.intensity * 0.12);
+        for (let ringIndex = 0; ringIndex < 3; ringIndex += 1) {
+          context.strokeStyle = `hsla(${event.hue}, 92%, 84%, ${
+            sigilAlpha * (1 - ringIndex * 0.18)
+          })`;
+          context.lineWidth = 1.2 + ringIndex * 0.6;
+          context.beginPath();
+          context.arc(
+            size.width * 0.5,
+            size.height * 0.5,
+            Math.min(size.width, size.height) *
+              (0.08 + ringIndex * 0.08 + progress * 0.06),
+            0,
+            TAU,
+          );
+          context.stroke();
+        }
+
+        for (let spokeIndex = 0; spokeIndex < 8; spokeIndex += 1) {
+          const angle = (spokeIndex / 8) * TAU + progress * 0.18;
+          const inner = Math.min(size.width, size.height) * 0.06;
+          const outer = Math.min(size.width, size.height) * (0.12 + progress * 0.06);
+          context.strokeStyle = `hsla(${event.hue}, 90%, 88%, ${sigilAlpha * 0.86})`;
+          context.lineWidth = 1;
+          context.beginPath();
+          context.moveTo(
+            size.width * 0.5 + Math.cos(angle) * inner,
+            size.height * 0.5 + Math.sin(angle) * inner,
+          );
+          context.lineTo(
+            size.width * 0.5 + Math.cos(angle) * outer,
+            size.height * 0.5 + Math.sin(angle) * outer,
+          );
+          context.stroke();
+        }
+
+        context.strokeStyle = `hsla(${event.hue}, 96%, 90%, ${sigilAlpha})`;
+        context.lineWidth = 1.3;
+        context.beginPath();
+        for (let index = 0; index < 6; index += 1) {
+          const angle = (index / 6) * TAU - Math.PI / 2 + progress * 0.12;
+          const x = size.width * 0.5 + Math.cos(angle) * Math.min(size.width, size.height) * 0.145;
+          const y = size.height * 0.5 + Math.sin(angle) * Math.min(size.width, size.height) * 0.145;
+          if (index === 0) {
+            context.moveTo(x, y);
+          } else {
+            context.lineTo(x, y);
+          }
+        }
+        context.closePath();
+        context.stroke();
+      });
+      const glyphBoost = 1 + cadenceGlow * 0.55;
+
       state.flashes = state.flashes.filter((flash) => now - flash.bornAt < flash.ttl);
 
       state.flashes.forEach((flash) => {
@@ -2457,7 +2638,8 @@ export function EchoSurface({
           flash.strength * (flash.kind === "bar" ? 130 : 58) * easeOutCubic(progress);
         const alpha =
           (1 - progress) *
-          (flash.kind === "bar" ? 0.22 : flash.kind === "touch" ? 0.28 : 0.36);
+          (flash.kind === "bar" ? 0.22 : flash.kind === "touch" ? 0.28 : 0.36) *
+          (1 + cadenceGlow * 0.46);
         const gradient = context.createRadialGradient(
           pixel.x,
           pixel.y,
@@ -2516,7 +2698,7 @@ export function EchoSurface({
         const dormantPath = warpPathForLoop(loop.points, loop, barProgress * 0.22, now);
 
         context.save();
-        context.shadowBlur = 20 + loop.energy * 18;
+        context.shadowBlur = 20 + loop.energy * 18 + cadenceGlow * 10;
         context.shadowColor =
           loop.dialogueKind === "response"
             ? `hsla(${visualHue}, 84%, 74%, 0.18)`
@@ -2559,6 +2741,7 @@ export function EchoSurface({
             barProgress * 0.2,
             now,
             chordHue,
+            glyphBoost,
           );
         });
 
@@ -2635,7 +2818,7 @@ export function EchoSurface({
           now,
         );
         context.save();
-        context.shadowBlur = 18 + loop.energy * 18;
+        context.shadowBlur = 18 + loop.energy * 18 + cadenceGlow * 12;
         context.shadowColor =
           loop.dialogueKind === "response"
             ? `hsla(${visualHue}, 88%, 80%, 0.24)`
@@ -2729,6 +2912,7 @@ export function EchoSurface({
             cycleProgress,
             now,
             chordHue,
+            glyphBoost,
           );
         });
       });
@@ -2875,6 +3059,7 @@ export function EchoSurface({
     simulationRef.current.activeTouches.clear();
     simulationRef.current.loops = [];
     simulationRef.current.flashes = [];
+    simulationRef.current.cadenceEvents = [];
     simulationRef.current.recentGestures = [];
     simulationRef.current.surfaceEnergy = 0.16;
     lastInteractionAtRef.current = performance.now();
