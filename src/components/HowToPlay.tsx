@@ -11,7 +11,7 @@ const guideSteps = [
     title: "2. Let the rite unfold",
     image: withBase("guide/trace.png"),
     alt: "Screenshot of Echo Surface with several inferred voices weaving across the same harmonic field.",
-    text: "Harmony still moves underneath everything on a shared bar clock, and now a compact progression strip lets you steer the harmonic cycle without turning the surface into a dashboard.",
+    text: "Harmony still moves underneath everything on a shared bar clock, a compact progression strip can steer the cycle, and call-and-response mode lets the surface answer a phrase one bar later with a related but transformed contour.",
   },
   {
     title: "3. Read the living score",

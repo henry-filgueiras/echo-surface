@@ -97,6 +97,8 @@ type ContourLoop = {
   bornAt: number;
   role: VoiceRole;
   hue: number;
+  dialogueKind: "source" | "response";
+  answerToLoopId?: number;
   energy: number;
   points: NormalizedPoint[];
   anchors: ContourAnchor[];
@@ -110,6 +112,8 @@ type ContourLoop = {
   synthetic: boolean;
   motionSeed: number;
   clusterSize: number;
+  registerShift: number;
+  landingBias: number;
 };
 
 type PlaybackFlash = {
@@ -118,6 +122,7 @@ type PlaybackFlash = {
   ttl: number;
   point: NormalizedPoint;
   role: VoiceRole;
+  response: boolean;
   hue: number;
   strength: number;
   kind: "touch" | "note" | "bar";
@@ -215,6 +220,14 @@ const VOICE_ROLE_ORDER: VoiceRole[] = [
   "percussion",
   "echo",
 ];
+const RESPONSE_GLYPH_HUE = 184;
+const RESPONSE_ROLE_MAP: Record<VoiceRole, VoiceRole[]> = {
+  pad: ["lead", "echo"],
+  bass: ["pad", "echo"],
+  lead: ["echo", "pad"],
+  percussion: ["echo", "bass"],
+  echo: ["lead", "pad"],
+};
 const PROGRESSION_OPTIONS: ProgressionOption[] = [
   {
     id: "cadence",
@@ -444,6 +457,37 @@ const findNearestChordToneIndex = (
   let bestDistance = Math.abs(chordToneValues[0].value - target);
 
   chordToneValues.forEach(({ value, index }) => {
+    const gap = Math.abs(value - target);
+    if (gap < bestDistance) {
+      bestDistance = gap;
+      bestIndex = index;
+    }
+  });
+
+  return bestIndex;
+};
+
+const findNearestPreferredChordToneIndex = (
+  values: number[],
+  target: number,
+  chordPitchClasses: number[],
+  preferredToneIndex: number,
+) => {
+  const preferredPitchClass =
+    chordPitchClasses[modulo(preferredToneIndex, chordPitchClasses.length)] ??
+    chordPitchClasses[0];
+  const preferredCandidates = values
+    .map((value, index) => ({ value, index }))
+    .filter(({ value }) => modulo(value, 12) === preferredPitchClass);
+
+  if (preferredCandidates.length === 0) {
+    return findNearestChordToneIndex(values, target, chordPitchClasses);
+  }
+
+  let bestIndex = preferredCandidates[0].index;
+  let bestDistance = Math.abs(preferredCandidates[0].value - target);
+
+  preferredCandidates.forEach(({ value, index }) => {
     const gap = Math.abs(value - target);
     if (gap < bestDistance) {
       bestDistance = gap;
@@ -947,6 +991,75 @@ const shapePointsForRole = (
   }
 };
 
+const getResponseRole = (sourceRole: VoiceRole, seed: number) => {
+  const options = RESPONSE_ROLE_MAP[sourceRole];
+  return options[modulo(seed, options.length)];
+};
+
+const buildResponsePoints = (
+  sourcePoints: NormalizedPoint[],
+  responseRole: VoiceRole,
+  seed: number,
+) => {
+  const base = smoothResampledPath(sourcePoints, Math.max(sourcePoints.length, 10), 1);
+  const centroid = averagePoint(base);
+  const timingSkew = 1 + (seed % 3) * 0.08;
+  const xPush = responseRole === "echo" ? 0.018 : responseRole === "lead" ? 0.012 : 0.008;
+  const yLift =
+    responseRole === "bass"
+      ? 0.06
+      : responseRole === "pad"
+        ? -0.03
+        : responseRole === "lead"
+          ? -0.02
+          : responseRole === "echo"
+            ? 0.015
+            : 0.02;
+  const transformed = base.map((current, index) => {
+    const amount = index / Math.max(base.length - 1, 1);
+    const ripple = Math.sin(amount * Math.PI * 1.5 + seed) * 0.018;
+    const tailBias = index >= base.length - 2 ? (responseRole === "bass" ? 0.03 : -0.022) : 0;
+
+    return point(
+      clamp(current.x * 0.94 + 0.03 + amount * xPush, 0.06, 0.95),
+      clamp(
+        mix(current.y, centroid.y, responseRole === "bass" ? 0.26 : 0.12) +
+          ripple +
+          yLift +
+          tailBias,
+        0.08,
+        0.92,
+      ),
+      current.t * timingSkew + index * 16,
+    );
+  });
+  const summary = summarizeGesture(
+    transformed,
+    Math.max(pathDuration(transformed), 1),
+    [],
+  );
+
+  switch (responseRole) {
+    case "pad":
+      return smoothResampledPath(transformed, 12, 2);
+    case "bass":
+      return smoothResampledPath(transformed, 10, 2).map((current, index, values) => {
+        const amount = index / Math.max(values.length - 1, 1);
+        return point(
+          current.x,
+          clamp(mix(current.y, centroid.y + 0.08, 0.34) + amount * 0.012, 0.16, 0.9),
+          current.t,
+        );
+      });
+    case "lead":
+      return createLeadPath(transformed);
+    case "percussion":
+      return createPercussionPath(transformed, 1);
+    case "echo":
+      return createEchoPath(shapePointsForRole("echo", transformed, summary));
+  }
+};
+
 const buildPhraseNotes = (
   loop: ContourLoop,
   harmonicState: HarmonicState,
@@ -965,7 +1078,12 @@ const buildPhraseNotes = (
           : loop.role === "percussion"
             ? clamp(loop.desiredRegisterMidi - 4, 50, 72)
             : clamp(loop.desiredRegisterMidi + 2, 62, 84);
-  const startTarget = registerTarget + (0.5 - firstAnchor.point.y) * 4;
+  const shiftedRegisterTarget = clamp(
+    registerTarget + loop.registerShift,
+    NOTE_RANGE_MIN,
+    NOTE_RANGE_MAX,
+  );
+  const startTarget = shiftedRegisterTarget + (0.5 - firstAnchor.point.y) * 4;
   let scaleIndex = findNearestChordToneIndex(
     scaleMidis,
     startTarget,
@@ -996,11 +1114,19 @@ const buildPhraseNotes = (
         anchor.emphasis > 0.62;
 
       if (wantsStability) {
-        const chordIndex = findNearestChordToneIndex(
-          scaleMidis,
-          scaleMidis[rawIndex],
-          chordPitchClasses,
-        );
+        const chordIndex =
+          loop.dialogueKind === "response"
+            ? findNearestPreferredChordToneIndex(
+                scaleMidis,
+                scaleMidis[rawIndex],
+                chordPitchClasses,
+                loop.landingBias,
+              )
+            : findNearestChordToneIndex(
+                scaleMidis,
+                scaleMidis[rawIndex],
+                chordPitchClasses,
+              );
         scaleIndex =
           Math.abs(chordIndex - rawIndex) <= 2 || anchor.emphasis > 0.82
             ? chordIndex
@@ -1011,11 +1137,19 @@ const buildPhraseNotes = (
     }
 
     if (index === loop.anchors.length - 1) {
-      scaleIndex = findNearestChordToneIndex(
-        scaleMidis,
-        scaleMidis[scaleIndex],
-        chordPitchClasses,
-      );
+      scaleIndex =
+        loop.dialogueKind === "response"
+          ? findNearestPreferredChordToneIndex(
+              scaleMidis,
+              scaleMidis[scaleIndex],
+              chordPitchClasses,
+              loop.landingBias,
+            )
+          : findNearestChordToneIndex(
+              scaleMidis,
+              scaleMidis[scaleIndex],
+              chordPitchClasses,
+            );
     }
 
     const midi = scaleMidis[scaleIndex];
@@ -1048,7 +1182,9 @@ const buildPhraseNotes = (
         ? scaleMidis[
             findNearestChordToneIndex(
               scaleMidis,
-              index === 0 ? registerTarget - 5 : registerTarget + 2,
+              index === 0
+                ? shiftedRegisterTarget - 5
+                : shiftedRegisterTarget + 2,
               index % 2 === 0 ? [chordPitchClasses[0], chordPitchClasses[2]] : chordPitchClasses,
             )
           ]
@@ -1056,7 +1192,7 @@ const buildPhraseNotes = (
           ? scaleMidis[
               findNearestChordToneIndex(
                 scaleMidis,
-                registerTarget + (index % 3 === 0 ? 7 : 0),
+                shiftedRegisterTarget + (index % 3 === 0 ? 7 : 0),
                 index % 3 === 1
                   ? [chordPitchClasses[1] ?? chordPitchClasses[0]]
                   : [chordPitchClasses[0], chordPitchClasses[2] ?? chordPitchClasses[0]],
@@ -1106,21 +1242,29 @@ const createLoopRecord = ({
   bornAt,
   role,
   hue,
+  dialogueKind = "source",
+  answerToLoopId,
   energy,
   points,
   scheduledAtMs,
   synthetic,
   clusterSize = 1,
+  registerShift = 0,
+  landingBias = 0,
 }: {
   id: number;
   bornAt: number;
   role: VoiceRole;
   hue: number;
+  dialogueKind?: "source" | "response";
+  answerToLoopId?: number;
   energy: number;
   points: NormalizedPoint[];
   scheduledAtMs: number;
   synthetic: boolean;
   clusterSize?: number;
+  registerShift?: number;
+  landingBias?: number;
 }): ContourLoop => {
   const contour = analyzeContour(points);
 
@@ -1129,6 +1273,8 @@ const createLoopRecord = ({
     bornAt,
     role,
     hue,
+    dialogueKind,
+    answerToLoopId,
     energy,
     points,
     anchors: contour.anchors,
@@ -1142,6 +1288,8 @@ const createLoopRecord = ({
     synthetic,
     motionSeed: Math.random() * TAU,
     clusterSize,
+    registerShift,
+    landingBias,
   };
 };
 
@@ -1157,6 +1305,11 @@ const getLoopHue = (role: VoiceRole) => {
   const palette = VOICE_ROLE_STYLES[role].palette;
   return palette.hue;
 };
+
+const getDialogueHue = (loop: ContourLoop, chordHue?: number) =>
+  loop.dialogueKind === "response"
+    ? mix(RESPONSE_GLYPH_HUE, chordHue ?? RESPONSE_GLYPH_HUE, 0.16)
+    : loop.hue;
 
 const formatVoiceRoleLabel = (role: VoiceRole) => {
   switch (role) {
@@ -1196,12 +1349,19 @@ const drawRoleGlyph = (
   size: number,
   alpha: number,
   rotation = 0,
+  hueOverride?: number,
 ) => {
   context.save();
   context.translate(x, y);
   context.rotate(rotation);
-  context.strokeStyle = getRoleColor(role, alpha, 18, role === "percussion" ? -100 : 8);
-  context.fillStyle = getRoleColor(role, alpha * 0.42, 12, role === "percussion" ? -100 : 2);
+  context.strokeStyle =
+    hueOverride === undefined
+      ? getRoleColor(role, alpha, 18, role === "percussion" ? -100 : 8)
+      : `hsla(${hueOverride}, ${role === "percussion" ? 10 : 88}%, 84%, ${alpha})`;
+  context.fillStyle =
+    hueOverride === undefined
+      ? getRoleColor(role, alpha * 0.42, 12, role === "percussion" ? -100 : 2)
+      : `hsla(${hueOverride}, ${role === "percussion" ? 10 : 82}%, 72%, ${alpha * 0.42})`;
   context.lineWidth = 1.25;
   context.lineCap = "round";
   context.lineJoin = "round";
@@ -1384,6 +1544,7 @@ const createPresetState = (
           ttl: 980,
           point: point(0.64, 0.46, 0),
           role: "lead" as const,
+          response: false,
           hue: getLoopHue("lead"),
           strength: 0.82,
           kind: "note" as const,
@@ -1490,6 +1651,7 @@ export function EchoSurface({
   const flashIdRef = useRef(0);
   const loopIdRef = useRef(0);
   const nextRoleOverrideRef = useRef<VoiceRoleOverride>("auto");
+  const callResponseEnabledRef = useRef(true);
   const [harmonicState, setHarmonicState] = useState(DEFAULT_HARMONIC_STATE);
   const [memory, setMemory] = useState<MemoryChip[]>([]);
   const [activeCount, setActiveCount] = useState(0);
@@ -1497,6 +1659,7 @@ export function EchoSurface({
   const [progressionIndex, setProgressionIndex] = useState(0);
   const [nextRoleOverride, setNextRoleOverride] =
     useState<VoiceRoleOverride>("auto");
+  const [callResponseEnabled, setCallResponseEnabled] = useState(true);
 
   const currentChord = useMemo(
     () => getChordForBar(harmonicState.currentBar, harmonicState),
@@ -1511,7 +1674,9 @@ export function EchoSurface({
     activeCount > 0
       ? "long drag pad • hold bass • tap cluster percussion • zigzag lead • circle echo"
       : nextRoleOverride === "auto"
-        ? "draw a phrase and let the surface infer the voice"
+        ? callResponseEnabled
+          ? "draw a phrase and the surface will answer one bar later"
+          : "draw a phrase and let the surface infer the voice"
         : `next contour sealed as ${formatVoiceRoleLabel(nextRoleOverride)}`;
 
   const syncMemory = () => {
@@ -1534,6 +1699,7 @@ export function EchoSurface({
     hue: number,
     strength: number,
     kind: PlaybackFlash["kind"],
+    response = false,
   ) => {
     simulationRef.current.flashes.push({
       id: flashIdRef.current++,
@@ -1541,6 +1707,7 @@ export function EchoSurface({
       ttl: kind === "bar" ? 1200 : 920,
       point: pointValue,
       role,
+      response,
       hue,
       strength,
       kind,
@@ -1857,6 +2024,41 @@ export function EchoSurface({
     return scale[findNearestChordToneIndex(scale, target, chordPitchClasses)];
   };
 
+  const createResponseLoop = (sourceLoop: ContourLoop, seed: number) => {
+    const harmonic = harmonicStateRef.current;
+    const responseRole = getResponseRole(sourceLoop.role, seed);
+    const responsePoints = buildResponsePoints(sourceLoop.points, responseRole, seed);
+    const responseScheduledAtMs =
+      sourceLoop.scheduledAtMs +
+      getBarMs(harmonic) +
+      getBeatMs(harmonic) * (0.16 + modulo(seed, 3) * 0.07);
+    const registerShift =
+      responseRole === "bass"
+        ? -12
+        : responseRole === "lead"
+          ? 12
+          : modulo(seed, 2) === 0
+            ? 12
+            : -12;
+    const landingBias = 1 + modulo(seed, 2);
+
+    return createLoopRecord({
+      id: loopIdRef.current++,
+      bornAt: performance.now(),
+      role: responseRole,
+      hue: getLoopHue(responseRole),
+      dialogueKind: "response",
+      answerToLoopId: sourceLoop.id,
+      energy: clamp(sourceLoop.energy * 0.86, 0.38, 1.08),
+      points: responsePoints,
+      scheduledAtMs: responseScheduledAtMs,
+      synthetic: true,
+      clusterSize: 1,
+      registerShift,
+      landingBias,
+    });
+  };
+
   const finalizeTouch = (pointerId: number) => {
     const touch = simulationRef.current.activeTouches.get(pointerId);
 
@@ -1900,19 +2102,27 @@ export function EchoSurface({
       },
     ].slice(-18);
 
+    const sourceLoop = createLoopRecord({
+      id: loopIdRef.current++,
+      bornAt: now,
+      role,
+      hue: roleHue,
+      dialogueKind: "source",
+      energy,
+      points: contourPoints,
+      scheduledAtMs: nextBarStartMs,
+      synthetic: false,
+      clusterSize: inferred.summary.nearbyTapCount + 1,
+    });
+    const responseLoop =
+      callResponseEnabledRef.current && role !== "percussion"
+        ? createResponseLoop(sourceLoop, loopIdRef.current + Math.round(now))
+        : undefined;
+
     simulationRef.current.loops = [
       ...simulationRef.current.loops,
-      createLoopRecord({
-        id: loopIdRef.current++,
-        bornAt: now,
-        role,
-        hue: roleHue,
-        energy,
-        points: contourPoints,
-        scheduledAtMs: nextBarStartMs,
-        synthetic: false,
-        clusterSize: inferred.summary.nearbyTapCount + 1,
-      }),
+      sourceLoop,
+      ...(responseLoop ? [responseLoop] : []),
     ].slice(-MAX_LOOPS);
 
     simulationRef.current.surfaceEnergy = clamp(
@@ -1946,6 +2156,10 @@ export function EchoSurface({
   useEffect(() => {
     nextRoleOverrideRef.current = nextRoleOverride;
   }, [nextRoleOverride]);
+
+  useEffect(() => {
+    callResponseEnabledRef.current = callResponseEnabled;
+  }, [callResponseEnabled]);
 
   useEffect(() => {
     if (!preset) {
@@ -2010,6 +2224,7 @@ export function EchoSurface({
       note: PhraseNote,
       cycleProgress: number,
       now: number,
+      chordHue: number,
     ) => {
       const warpedPoint = warpPointForRole(
         pointValue,
@@ -2033,6 +2248,7 @@ export function EchoSurface({
       const angle = Math.atan2(nextPixel.y - pixel.y, nextPixel.x - pixel.x);
       const glow = active ? 1 : note.trigger ? 0.5 : 0.24;
       const radius = (note.chordTone ? 18 : 14) + note.accent * 12 + (active ? 6 : 0);
+      const glyphHue = getDialogueHue(loop, chordHue);
       const halo = context.createRadialGradient(
         pixel.x,
         pixel.y,
@@ -2042,9 +2258,24 @@ export function EchoSurface({
         radius,
       );
 
-      halo.addColorStop(0, getRoleColor(loop.role, 0.22 * glow, 16, 6));
-      halo.addColorStop(0.52, getRoleColor(loop.role, 0.1 * glow, 4, 2));
-      halo.addColorStop(1, getRoleColor(loop.role, 0, 0, 0));
+      halo.addColorStop(
+        0,
+        loop.dialogueKind === "response"
+          ? `hsla(${glyphHue}, 90%, 82%, ${0.26 * glow})`
+          : getRoleColor(loop.role, 0.22 * glow, 16, 6),
+      );
+      halo.addColorStop(
+        0.52,
+        loop.dialogueKind === "response"
+          ? `hsla(${glyphHue}, 84%, 70%, ${0.12 * glow})`
+          : getRoleColor(loop.role, 0.1 * glow, 4, 2),
+      );
+      halo.addColorStop(
+        1,
+        loop.dialogueKind === "response"
+          ? `hsla(${glyphHue}, 84%, 68%, 0)`
+          : getRoleColor(loop.role, 0, 0, 0),
+      );
       context.fillStyle = halo;
       context.beginPath();
       context.arc(pixel.x, pixel.y, radius, 0, TAU);
@@ -2058,6 +2289,7 @@ export function EchoSurface({
         (note.trigger ? 5.2 : 4) + note.accent * 2 + (active ? 2.2 : 0),
         0.42 + glow * 0.42,
         angle,
+        loop.dialogueKind === "response" ? glyphHue : undefined,
       );
 
       if (active) {
@@ -2219,6 +2451,7 @@ export function EchoSurface({
         const pixel = normalizedToPixels(flash.point, size);
         const age = now - flash.bornAt;
         const progress = clamp(age / flash.ttl, 0, 1);
+        const flashHue = flash.response ? RESPONSE_GLYPH_HUE : flash.hue;
         const radius =
           (flash.kind === "bar" ? 24 : 12) +
           flash.strength * (flash.kind === "bar" ? 130 : 58) * easeOutCubic(progress);
@@ -2238,15 +2471,24 @@ export function EchoSurface({
           0,
           flash.kind === "bar"
             ? `hsla(${flash.hue}, 92%, 78%, ${alpha * 0.22})`
-            : getRoleColor(flash.role, alpha * 0.24, 14, 8),
+            : flash.response
+              ? `hsla(${flashHue}, 88%, 80%, ${alpha * 0.26})`
+              : getRoleColor(flash.role, alpha * 0.24, 14, 8),
         );
         gradient.addColorStop(
           0.54,
           flash.kind === "bar"
             ? `hsla(${flash.hue}, 86%, 62%, ${alpha * 0.1})`
-            : getRoleColor(flash.role, alpha * 0.1, 0, 0),
+            : flash.response
+              ? `hsla(${flashHue}, 82%, 68%, ${alpha * 0.12})`
+              : getRoleColor(flash.role, alpha * 0.1, 0, 0),
         );
-        gradient.addColorStop(1, getRoleColor(flash.role, 0, 0, 0));
+        gradient.addColorStop(
+          1,
+          flash.response
+            ? `hsla(${flashHue}, 82%, 68%, 0)`
+            : getRoleColor(flash.role, 0, 0, 0),
+        );
 
         context.fillStyle = gradient;
         context.beginPath();
@@ -2261,21 +2503,31 @@ export function EchoSurface({
           (flash.kind === "bar" ? 8.4 : 5.6) + flash.strength * 2.8,
           alpha * (flash.kind === "bar" ? 0.9 : 1),
           now * 0.0014,
+          flash.response ? flashHue : undefined,
         );
       });
 
       state.loops.forEach((loop) => {
         const loopDurationMs = getBarMs(harmonic) * loop.loopBars;
+        const visualHue =
+          loop.dialogueKind === "response"
+            ? mix(loop.hue, RESPONSE_GLYPH_HUE, 0.6)
+            : loop.hue;
         const dormantPath = warpPathForLoop(loop.points, loop, barProgress * 0.22, now);
 
         context.save();
         context.shadowBlur = 20 + loop.energy * 18;
-        context.shadowColor = getRoleColor(loop.role, 0.18, 8, 4);
+        context.shadowColor =
+          loop.dialogueKind === "response"
+            ? `hsla(${visualHue}, 84%, 74%, 0.18)`
+            : getRoleColor(loop.role, 0.18, 8, 4);
         drawPolyline(
           context,
           size,
           dormantPath,
-          getRoleColor(loop.role, 0.08 + loop.energy * 0.08, 6, 4),
+          loop.dialogueKind === "response"
+            ? `hsla(${visualHue}, 78%, 70%, ${0.1 + loop.energy * 0.08})`
+            : getRoleColor(loop.role, 0.08 + loop.energy * 0.08, 6, 4),
           loop.role === "pad" ? 7.4 : loop.role === "bass" ? 6.4 : 4.8,
         );
         context.restore();
@@ -2284,7 +2536,9 @@ export function EchoSurface({
           context,
           size,
           dormantPath,
-          getRoleColor(loop.role, 0.18 + loop.energy * 0.12, 12, 8),
+          loop.dialogueKind === "response"
+            ? `hsla(${visualHue}, 82%, 78%, ${0.18 + loop.energy * 0.14})`
+            : getRoleColor(loop.role, 0.18 + loop.energy * 0.12, 12, 8),
           loop.role === "percussion" ? 1.8 : 2.1,
         );
 
@@ -2296,7 +2550,16 @@ export function EchoSurface({
 
           const nextAnchor =
             loop.anchors[Math.min(index + 1, loop.anchors.length - 1)] ?? anchor;
-          drawNoteGlyph(loop, anchor.point, nextAnchor.point, false, note, barProgress * 0.2, now);
+          drawNoteGlyph(
+            loop,
+            anchor.point,
+            nextAnchor.point,
+            false,
+            note,
+            barProgress * 0.2,
+            now,
+            chordHue,
+          );
         });
 
         if (now < loop.scheduledAtMs) {
@@ -2342,8 +2605,8 @@ export function EchoSurface({
             now,
           );
           const noteHue = activeNote.chordTone
-            ? mix(loop.hue, chordHue, 0.18)
-            : loop.hue;
+            ? mix(getDialogueHue(loop, chordHue), chordHue, 0.18)
+            : getDialogueHue(loop, chordHue);
           playMelodicTone({
             midi: activeNote.midi,
             hue: noteHue,
@@ -2360,6 +2623,7 @@ export function EchoSurface({
             noteHue,
             0.62 + activeNote.accent * 0.22,
             "note",
+            loop.dialogueKind === "response",
           );
           loop.lastTriggeredToken = triggerToken;
         }
@@ -2372,12 +2636,17 @@ export function EchoSurface({
         );
         context.save();
         context.shadowBlur = 18 + loop.energy * 18;
-        context.shadowColor = getRoleColor(loop.role, 0.24, 18, 10);
+        context.shadowColor =
+          loop.dialogueKind === "response"
+            ? `hsla(${visualHue}, 88%, 80%, 0.24)`
+            : getRoleColor(loop.role, 0.24, 18, 10);
         drawPolyline(
           context,
           size,
           retracePath,
-          getRoleColor(loop.role, 0.28 + loop.energy * 0.16, 20, 12),
+          loop.dialogueKind === "response"
+            ? `hsla(${visualHue}, 92%, 84%, ${0.3 + loop.energy * 0.16})`
+            : getRoleColor(loop.role, 0.28 + loop.energy * 0.16, 20, 12),
           loop.role === "pad" ? 4.8 : loop.role === "bass" ? 4.2 : 3.4,
         );
         context.restore();
@@ -2409,9 +2678,24 @@ export function EchoSurface({
           headPixel.y,
           headRadius,
         );
-        headGlow.addColorStop(0, getRoleColor(loop.role, 0.42, 18, 8));
-        headGlow.addColorStop(0.56, getRoleColor(loop.role, 0.16, 6, 2));
-        headGlow.addColorStop(1, getRoleColor(loop.role, 0, 0, 0));
+        headGlow.addColorStop(
+          0,
+          loop.dialogueKind === "response"
+            ? `hsla(${visualHue}, 90%, 84%, 0.44)`
+            : getRoleColor(loop.role, 0.42, 18, 8),
+        );
+        headGlow.addColorStop(
+          0.56,
+          loop.dialogueKind === "response"
+            ? `hsla(${visualHue}, 82%, 72%, 0.18)`
+            : getRoleColor(loop.role, 0.16, 6, 2),
+        );
+        headGlow.addColorStop(
+          1,
+          loop.dialogueKind === "response"
+            ? `hsla(${visualHue}, 82%, 68%, 0)`
+            : getRoleColor(loop.role, 0, 0, 0),
+        );
         context.fillStyle = headGlow;
         context.beginPath();
         context.arc(headPixel.x, headPixel.y, headRadius, 0, TAU);
@@ -2425,6 +2709,7 @@ export function EchoSurface({
           6.2 + (activeNote?.accent ?? 0.4) * 3.2,
           0.88,
           now * 0.0016,
+          loop.dialogueKind === "response" ? visualHue : undefined,
         );
 
         loop.anchors.forEach((anchor, index) => {
@@ -2435,7 +2720,16 @@ export function EchoSurface({
 
           const nextAnchor =
             loop.anchors[Math.min(index + 1, loop.anchors.length - 1)] ?? anchor;
-          drawNoteGlyph(loop, anchor.point, nextAnchor.point, index === activeStepIndex, note, cycleProgress, now);
+          drawNoteGlyph(
+            loop,
+            anchor.point,
+            nextAnchor.point,
+            index === activeStepIndex,
+            note,
+            cycleProgress,
+            now,
+            chordHue,
+          );
         });
       });
 
@@ -2594,6 +2888,13 @@ export function EchoSurface({
     setIsMuted(soundRef.current.muted);
   };
 
+  const toggleCallResponse = () => {
+    const nextValue = !callResponseEnabledRef.current;
+    callResponseEnabledRef.current = nextValue;
+    setCallResponseEnabled(nextValue);
+    lastInteractionAtRef.current = performance.now();
+  };
+
   const selectProgression = (index: number) => {
     const option = PROGRESSION_OPTIONS[index];
     const nextState = {
@@ -2749,6 +3050,9 @@ export function EchoSurface({
                 onPointerMove={stopSurfaceGesture}
                 onPointerUp={stopSurfaceGesture}
               >
+                <button className="surface-tool" type="button" onClick={toggleCallResponse}>
+                  {callResponseEnabled ? "Answer on" : "Answer off"}
+                </button>
                 <button className="surface-tool" type="button" onClick={toggleMuted}>
                   {isMuted ? "Sound off" : "Sound on"}
                 </button>
