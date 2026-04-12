@@ -240,6 +240,33 @@ The surface is no longer a single flat plane. It now supports softly bounded ell
 
 Important conceptual note: scopes are not containers in an app-UI sense. They are more like harmonic territories: fields of influence that give a region of the canvas its own musical character. The user is not managing a hierarchy — they are drawing an instrument and discovering that some regions sound different.
 
+### Phase 12: Scope Sigils — Semantic Compression Through Symbol
+
+When viewing the full collection (camera at default zoom = 1), each scope now collapses into a canonical **sigil**: a layered sacred-geometry glyph that encodes the scope's musical invariants as stable visual symbols.
+
+The sigil is procedurally derived from six invariants, each mapped to a geometric dimension:
+
+- **Tonic (key)** → polygon rotation angle. C = 0°, each chromatic step = +30°. The key is literally encoded as an orientation, so two scopes in different keys will always point differently.
+- **Mode** → polygon type. Major = hexagon, minor = pentagon. The structural shape of the sigil changes with mode.
+- **BPM** → spoke count. `<75bpm` → 3 spokes, `75–104` → 4, `105–144` → 6, `145+` → 8. Slow tempos read as heavy and sparse; fast tempos read as energetic and radially dense.
+- **Scene section** → outer ring system. `verse` = single dashed ring (spacious); `chorus` = two solid rings (lifted); `bridge` = broken arc ring (suspended); `drop` = triple bold rings (maximum density).
+- **Active voice roles** → orbiting satellites. Each active role in the scope produces a small role-glyph (circle/square/star/diamond/wave) orbiting the sigil at a fixed radius. Voice count and roles are readable at a glance.
+- **Motif density** → center-eye radius. The central "eye" of the sigil expands with denser phrase activity, giving a direct visual reading of how rich the scope's phrase content is.
+
+**Animation reflecting live state:**
+- Slow base rotation (≈ 1° every 3 seconds) — the entire sigil drifts as a unit; it is alive, not frozen.
+- Beat pulse — the center eye and ring brightness expand on each beat and decay sharply afterward, directly mirroring the scope's BPM.
+- Voice satellites orbit in alternating directions, accelerating subtly during cadence events.
+- Cadence glow brightens all layers during climax events.
+
+**Zoom-based crossfade:**
+The sigil and the full scope rendering crossfade smoothly as the camera zoom transitions from 1.0 (full collection) to 2.6 (zoomed in). At zoom=1 only the sigil is visible; by zoom=2.6 the full ellipse + clock emitters take over. This means "falling into" a scope is a gradual reveal — the abstract glyph expands into the navigable territory.
+
+**Visual language / aesthetic:**
+The sigil layers are: background halo → outer scene rings → radial spokes → primary polygon → inner star → voice satellites → center eye. This stacking produces a Vitruvian / ritual-circle aesthetic with clear semantic load. Each scope looks like a sigil that has been *cast*, not *configured*.
+
+**Conceptual note:** The sigil is the scope's identity at rest: a compressed symbolic artifact representing its complete musical state. When you can see three scopes at once, you can read them as three distinct ritual objects without needing to enter any of them. This is semantic compression through symbolic representation.
+
 ## Current Implementation Shape
 
 Most of the intelligence currently lives in:
