@@ -194,6 +194,32 @@ An additional feeling worth protecting now is:
 
 4. "The silences felt chosen."
 
+### Phase 10: Scene Morphing — Macro Musical Form
+
+The surface now composes larger musical form over time through four named scene states:
+
+- `verse` — settled, spacious, sparse voices, root-biased chord landings, 82% cadence weight
+- `chorus` — lifted and open, 3rd-biased landings, denser voices, warmer/brighter palette shift, 128% cadence weight
+- `bridge` — suspended tension, 5th-biased landings, very sparse voices, muted/cooler palette, 58% cadence weight
+- `drop` — maximum density, root-grounded, near-zero rests, full voice weight, richest colour, 188% cadence weight
+
+The default cycle is `verse → chorus → verse → bridge → chorus → drop` on an 8-bar clock.
+
+Each scene modifies five independent dimensions:
+1. **Harmonic progression bias** — the preferred chord-tone landing index shifts the note resolution at stable phrase points
+2. **Voice activity weighting** — probability of spawning call-and-response voices; bridge is sparse (30%), drop is always on (100%)
+3. **Visual color palette** — the harmonic wash hue, saturation, and brightness shift per scene (warm amber in chorus, violet in bridge, gold in drop)
+4. **Cadence intensity** — the cadence event fires harder or softer depending on scene
+5. **Rest density** — the rest-score threshold is lifted (bridge, verse) or lowered (chorus, drop), biasing phrase density
+
+The `phraseToken` now includes the scene name, so all active loops immediately rebuild their phrase notes when a scene transition fires.
+
+**Bonus: early transition.** If `surfaceEnergy ≥ 0.72`, `activeRoles ≥ 3`, and `recentGestures ≥ 3` within the last two bars, the system can skip ahead before the 8-bar window expires — jumping `verse → chorus` or `chorus → drop` in response to high interaction energy or phrase density. This makes the surface feel compositionally responsive to how intensely it is being played.
+
+A minimal scene label appears bottom-centre with per-scene colour accents and a fade-in animation on each transition. It stays peripheral enough that the canvas remains the protagonist.
+
+Important conceptual point: this is not "song sections" in the DAW sense. It is dramaturgical. The surface is not following a chart; it is accumulating conviction over time and releasing it.
+
 ## Current Implementation Shape
 
 Most of the intelligence currently lives in:
