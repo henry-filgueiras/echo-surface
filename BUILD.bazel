@@ -28,6 +28,12 @@ filegroup(
         "//src:styles_component",
         "//src/components:echo_surface_component",
         "//src/components:how_to_play_component",
+        "//src/surface:surface_modules",
+        "//src/world:world_modules",
+        "//src/music:music_modules",
+        "//src/interaction:interaction_modules",
+        "//src/rendering:rendering_modules",
+        "//src/emergence:emergence_modules",
     ],
 )
 

@@ -218,6 +218,34 @@ The `phraseToken` now includes the scene name, so all active loops immediately r
 
 **Bonus: early transition.** If `surfaceEnergy ≥ 0.72`, `activeRoles ≥ 3`, and `recentGestures ≥ 3` within the last two bars, the system can skip ahead before the 8-bar window expires — jumping `verse → chorus` or `chorus → drop` in response to high interaction energy or phrase density. This makes the surface feel compositionally responsive to how intensely it is being played.
 
+## Architectural Compaction Note
+
+1. **New module structure**
+
+- `src/world/scope.ts` now owns scope lookup, scope-context resolution, and screen/world transform logic.
+- `src/music/engine.ts` now owns harmonic timing, scale/chord resolution, rhythm attraction, phrase construction, fusion behavior, and preset loop seeding.
+- `src/rendering/glyphs.ts` now owns glyph drawing, role colour resolution, dialogue hue treatment, and loop warping.
+- `src/rendering/emitters.ts` now owns scope sigils and the zoom-threshold emitter/sigil blend.
+- `src/interaction/grammar.ts` now owns gesture summarization, role inference, gesture shaping, response-contour shaping, and pointer-to-surface coordinate capture.
+- `src/emergence/memory.ts` now owns projected memory chips plus scope-level motif density / active-role snapshots.
+- `src/surface/model.ts` and `src/surface/contour.ts` became the substrate: shared ontology, role/style constants, and contour/time primitives used by every higher layer.
+
+2. **Concepts that emerged as first-class primitives**
+
+- `ContourLoop` is now clearly the core authored musical object: a contour, anchor set, phrase state, role identity, and scope attachment.
+- `ScopeRecord` is no longer just a rendering overlay. It is a musical world with inherited overrides and camera semantics.
+- `GestureSummary` and contour utilities became a proper interaction grammar instead of hidden heuristics inside the component.
+- `PhraseNote`, `RhythmAttractionField`, and `FusionVoice` now read as music-engine primitives rather than incidental render-time data.
+- `MotifSnapshot` / memory projection is now an explicit emergence layer, which should make future motif recall and transformation work easier to add without touching rendering or input code first.
+
+3. **Duplication and drift discovered**
+
+- Scope-level active-role and motif-density logic had drifted into the render loop as ad hoc calculations; that is now centralized in `emergence/memory.ts`.
+- Role semantics were previously leaking across interaction, rendering, and music in one file. The real invariant is that role is shared ontology, while each subsystem interprets it differently.
+- Contour math, path sampling, and temporal interpolation were serving rendering, fusion overlap, rhythm locking, and phrase triggering simultaneously, but were not treated as a shared primitive. That was a hidden source of coupling.
+- A key hidden invariant is that phrase state must be rebuilt whenever the harmonic/scene token changes before note triggering or motif-density reads happen; otherwise rendering and playback silently diverge.
+- Another hidden invariant is that loop scheduling depends on resolving the innermost scope context before bar alignment. If scope resolution happens later, the phrase belongs to the wrong harmonic world even if its visuals look correct.
+
 A minimal scene label appears bottom-centre with per-scene colour accents and a fade-in animation on each transition. It stays peripheral enough that the canvas remains the protagonist.
 
 Important conceptual point: this is not "song sections" in the DAW sense. It is dramaturgical. The surface is not following a chart; it is accumulating conviction over time and releasing it.
