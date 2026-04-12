@@ -126,6 +126,7 @@ type PlaybackFlash = {
   hue: number;
   strength: number;
   kind: "touch" | "note" | "bar";
+  fusion?: FusionSignature;
 };
 
 type CadenceEvent = {
@@ -135,6 +136,28 @@ type CadenceEvent = {
   barNumber: number;
   hue: number;
   intensity: number;
+};
+
+type FusionTimbre = "shimmer" | "arp" | "harmonic-echo";
+
+type FusionSignature = {
+  roles: [VoiceRole, VoiceRole];
+  hues: [number, number];
+  timbre: FusionTimbre;
+};
+
+type FusionVoice = {
+  id: number;
+  bornAt: number;
+  ttl: number;
+  pairKey: string;
+  point: NormalizedPoint;
+  sourcePoints: [NormalizedPoint, NormalizedPoint];
+  midiRoot: number;
+  strength: number;
+  motionSeed: number;
+  lastTriggeredToken: string;
+  signature: FusionSignature;
 };
 
 type AudioEngine = {
@@ -153,6 +176,7 @@ type SimulationState = {
   flashes: PlaybackFlash[];
   recentGestures: RecentGesture[];
   cadenceEvents: CadenceEvent[];
+  fusionVoices: FusionVoice[];
   surfaceEnergy: number;
 };
 
@@ -160,6 +184,14 @@ type MemoryChip = {
   id: number;
   hue: number;
   role: VoiceRole;
+};
+
+type ActiveLoopSnapshot = {
+  loop: ContourLoop;
+  head: NormalizedPoint;
+  retracePath: NormalizedPoint[];
+  midi: number;
+  noteAccent: number;
 };
 
 type ToneVoice = VoiceRole | "touch" | "bar";
@@ -182,6 +214,11 @@ const BEATS_PER_BAR = 4;
 const IDLE_PAD_AFTER_MS = 1200;
 const CADENCE_BAR_INTERVAL = 8;
 const CADENCE_TTL_MS = 2400;
+const MAX_FUSION_VOICES = 8;
+const FUSION_HEAD_DISTANCE = 0.11;
+const FUSION_PATH_DISTANCE = 0.12;
+const FUSION_OVERLAP_THRESHOLD = 0.58;
+const FUSION_COOLDOWN_BEATS = 1.5;
 const NOTE_RANGE_MIN = 48;
 const NOTE_RANGE_MAX = 88;
 const NOTE_NAMES = [
@@ -285,6 +322,11 @@ const lerp = (from: number, to: number, amount: number) =>
   from + (to - from) * amount;
 
 const mix = (a: number, b: number, amount: number) => lerp(a, b, amount);
+
+const mixHue = (from: number, to: number, amount: number) => {
+  const delta = modulo(to - from + 180, 360) - 180;
+  return modulo(from + delta * amount, 360);
+};
 
 const distance = (a: NormalizedPoint, b: NormalizedPoint) =>
   Math.hypot(a.x - b.x, a.y - b.y);
@@ -1353,6 +1395,139 @@ const getVoiceRoleGlyphLabel = (role: VoiceRole) => {
   }
 };
 
+const getFusionTimbre = (
+  firstRole: VoiceRole,
+  secondRole: VoiceRole,
+): FusionTimbre => {
+  const roles = [firstRole, secondRole];
+
+  if (roles.includes("echo")) {
+    return "harmonic-echo";
+  }
+
+  if (roles.includes("lead") || roles.includes("percussion")) {
+    return "arp";
+  }
+
+  return "shimmer";
+};
+
+const getFusionPulseCount = (timbre: FusionTimbre) => {
+  switch (timbre) {
+    case "arp":
+      return 7;
+    case "harmonic-echo":
+      return 4;
+    case "shimmer":
+    default:
+      return 5;
+  }
+};
+
+const getFusionPulseDurationMs = (
+  timbre: FusionTimbre,
+  harmonicState: HarmonicState,
+) => {
+  const beatMs = getBeatMs(harmonicState);
+
+  switch (timbre) {
+    case "arp":
+      return beatMs * 0.32;
+    case "harmonic-echo":
+      return beatMs * 0.74;
+    case "shimmer":
+    default:
+      return beatMs * 0.5;
+  }
+};
+
+const getFusionPairKey = (firstLoopId: number, secondLoopId: number) =>
+  [firstLoopId, secondLoopId].sort((left, right) => left - right).join(":");
+
+const getPathOverlapScore = (
+  firstPath: NormalizedPoint[],
+  secondPath: NormalizedPoint[],
+) => {
+  if (firstPath.length === 0 || secondPath.length === 0) {
+    return 0;
+  }
+
+  const sampleCount = Math.max(
+    6,
+    Math.min(12, Math.max(firstPath.length, secondPath.length)),
+  );
+  const sampledFirst = resamplePath(firstPath, sampleCount);
+  const sampledSecond = resamplePath(secondPath, sampleCount);
+  let nearCount = 0;
+  let totalNearestDistance = 0;
+
+  sampledFirst.forEach((current) => {
+    const nearestDistance = sampledSecond.reduce(
+      (best, candidate) => Math.min(best, distance(current, candidate)),
+      Number.POSITIVE_INFINITY,
+    );
+
+    totalNearestDistance += nearestDistance;
+    if (nearestDistance <= FUSION_PATH_DISTANCE) {
+      nearCount += 1;
+    }
+  });
+
+  const averageDistance = totalNearestDistance / sampleCount;
+  return clamp(
+    (1 - averageDistance / 0.18) * 0.44 + (nearCount / sampleCount) * 0.56,
+    0,
+    1,
+  );
+};
+
+const getFusionMidi = (
+  fusion: FusionVoice,
+  pulseIndex: number,
+  harmonicState: HarmonicState,
+  chordSymbol: string,
+) => {
+  const scale = buildExtendedScaleMidis(harmonicState, 42, 96);
+  const chordPitchClasses = getChordPitchClasses(harmonicState, chordSymbol);
+  const base = clamp(fusion.midiRoot, 44, 88);
+
+  switch (fusion.signature.timbre) {
+    case "arp": {
+      const targets = [0, 4, 7, 12, 7, 4, 14];
+      return scale[
+        findNearestChordToneIndex(
+          scale,
+          base + targets[pulseIndex % targets.length],
+          chordPitchClasses,
+        )
+      ];
+    }
+    case "harmonic-echo": {
+      const targets = [0, 7, 12, 7];
+      const preferredTone = pulseIndex % 4 === 2 ? 1 : pulseIndex % 2 === 0 ? 0 : 2;
+      return scale[
+        findNearestPreferredChordToneIndex(
+          scale,
+          base + targets[pulseIndex % targets.length],
+          chordPitchClasses,
+          preferredTone,
+        )
+      ];
+    }
+    case "shimmer":
+    default: {
+      const targets = [12, 7, 14, 9, 16];
+      return scale[
+        findNearestChordToneIndex(
+          scale,
+          base + targets[pulseIndex % targets.length],
+          chordPitchClasses,
+        )
+      ];
+    }
+  }
+};
+
 const drawRoleGlyph = (
   context: CanvasRenderingContext2D,
   role: VoiceRole,
@@ -1426,6 +1601,93 @@ const drawRoleGlyph = (
       context.closePath();
       context.fill();
       context.stroke();
+      break;
+  }
+
+  context.restore();
+};
+
+const drawFusionGlyph = (
+  context: CanvasRenderingContext2D,
+  signature: FusionSignature,
+  x: number,
+  y: number,
+  size: number,
+  alpha: number,
+  rotation = 0,
+  pulse = 0,
+) => {
+  const blendedHue = mixHue(signature.hues[0], signature.hues[1], 0.5);
+  const orbit = size * 0.42;
+
+  context.save();
+  context.translate(x, y);
+  context.rotate(rotation);
+  context.strokeStyle = `hsla(${blendedHue}, 96%, 84%, ${alpha * 0.82})`;
+  context.fillStyle = `hsla(${blendedHue}, 96%, 78%, ${alpha * 0.18})`;
+  context.lineWidth = 1.25;
+  context.beginPath();
+  context.arc(0, 0, size * (0.92 + pulse * 0.08), 0, TAU);
+  context.fill();
+  context.stroke();
+
+  drawRoleGlyph(
+    context,
+    signature.roles[0],
+    -orbit,
+    0,
+    size * 0.7,
+    alpha * 0.78,
+    rotation * 0.35,
+    mixHue(signature.hues[0], blendedHue, 0.18),
+  );
+  drawRoleGlyph(
+    context,
+    signature.roles[1],
+    orbit,
+    0,
+    size * 0.7,
+    alpha * 0.78,
+    -rotation * 0.35,
+    mixHue(signature.hues[1], blendedHue, 0.18),
+  );
+
+  context.strokeStyle = `hsla(${blendedHue}, 98%, 90%, ${alpha * 0.72})`;
+  context.fillStyle = `hsla(${blendedHue}, 98%, 90%, ${alpha * 0.72})`;
+
+  switch (signature.timbre) {
+    case "shimmer":
+      context.lineWidth = 1.1;
+      for (let index = 0; index < 6; index += 1) {
+        const angle = (index / 6) * TAU;
+        const inner = size * 0.34;
+        const outer = size * (0.88 + pulse * 0.08);
+        context.beginPath();
+        context.moveTo(Math.cos(angle) * inner, Math.sin(angle) * inner);
+        context.lineTo(Math.cos(angle) * outer, Math.sin(angle) * outer);
+        context.stroke();
+      }
+      break;
+    case "arp":
+      for (let index = 0; index < 3; index += 1) {
+        const px = -size * 0.46 + index * size * 0.44;
+        const py = size * 0.42 - index * size * 0.3;
+        context.beginPath();
+        context.arc(px, py, size * 0.12 + (2 - index) * 0.2, 0, TAU);
+        context.fill();
+      }
+      break;
+    case "harmonic-echo":
+      context.lineWidth = 1;
+      for (let index = 0; index < 2; index += 1) {
+        const radius = size * (0.58 + index * 0.22 + pulse * 0.04);
+        context.beginPath();
+        context.arc(0, 0, radius, Math.PI * 0.16, Math.PI * 0.84);
+        context.stroke();
+        context.beginPath();
+        context.arc(0, 0, radius, Math.PI * 1.16, Math.PI * 1.84);
+        context.stroke();
+      }
       break;
   }
 
@@ -1563,6 +1825,7 @@ const createPresetState = (
         },
       ],
       cadenceEvents: [],
+      fusionVoices: [],
     };
   }
 
@@ -1598,6 +1861,7 @@ const createPresetState = (
       ],
       flashes: [],
       cadenceEvents: [],
+      fusionVoices: [],
     };
   }
 
@@ -1632,6 +1896,7 @@ const createPresetState = (
     ],
     flashes: [],
     cadenceEvents: [],
+    fusionVoices: [],
   };
 };
 
@@ -1658,6 +1923,7 @@ export function EchoSurface({
     flashes: [],
     recentGestures: [],
     cadenceEvents: [],
+    fusionVoices: [],
     surfaceEnergy: 0.18,
   });
   const harmonicStateRef = useRef<HarmonicState>(DEFAULT_HARMONIC_STATE);
@@ -1667,6 +1933,8 @@ export function EchoSurface({
   const flashIdRef = useRef(0);
   const loopIdRef = useRef(0);
   const cadenceIdRef = useRef(0);
+  const fusionIdRef = useRef(0);
+  const fusionCooldownRef = useRef(new Map<string, number>());
   const nextRoleOverrideRef = useRef<VoiceRoleOverride>("auto");
   const callResponseEnabledRef = useRef(true);
   const [harmonicState, setHarmonicState] = useState(DEFAULT_HARMONIC_STATE);
@@ -1689,11 +1957,11 @@ export function EchoSurface({
       : Array.from(new Set(memory.map((chip) => chip.role))).join(" • ");
   const whisperLabel =
     activeCount > 0
-      ? "long drag pad • hold bass • tap cluster percussion • zigzag lead • circle echo"
+      ? "overlap living phrases to summon fusion voices • long drag pad • hold bass • tap cluster percussion • zigzag lead • circle echo"
       : nextRoleOverride === "auto"
         ? callResponseEnabled
-          ? "draw a phrase and the surface will answer one bar later"
-          : "draw a phrase and let the surface infer the voice"
+          ? "draw a phrase, let the surface answer one bar later, and braid overlaps into fusion"
+          : "draw a phrase, let the surface infer the voice, and overlap phrases for fusion"
         : `next contour sealed as ${formatVoiceRoleLabel(nextRoleOverride)}`;
 
   const syncMemory = () => {
@@ -1717,6 +1985,7 @@ export function EchoSurface({
     strength: number,
     kind: PlaybackFlash["kind"],
     response = false,
+    fusion?: FusionSignature,
   ) => {
     simulationRef.current.flashes.push({
       id: flashIdRef.current++,
@@ -1728,6 +1997,7 @@ export function EchoSurface({
       hue,
       strength,
       kind,
+      fusion,
     });
 
     if (simulationRef.current.flashes.length > MAX_ACTIVE_FLASHES) {
@@ -1991,6 +2261,110 @@ export function EchoSurface({
     }
   };
 
+  const playFusionTone = ({
+    midi,
+    hue,
+    accent,
+    durationMs,
+    timbre,
+  }: {
+    midi: number;
+    hue: number;
+    accent: number;
+    durationMs: number;
+    timbre: FusionTimbre;
+  }) => {
+    const engine = soundRef.current;
+
+    if (
+      !engine.context ||
+      !engine.compressor ||
+      !engine.fxSend ||
+      engine.muted
+    ) {
+      return;
+    }
+
+    const context = engine.context;
+    const now = context.currentTime;
+    const duration = clamp(durationMs / 1000, 0.16, 1.6);
+    const frequency = midiToFrequency(midi);
+    const primary = context.createOscillator();
+    const secondary = context.createOscillator();
+    const air = context.createOscillator();
+    const filter = context.createBiquadFilter();
+    const gain = context.createGain();
+    const send = context.createGain();
+    const brightness = hue / 220;
+
+    primary.type = timbre === "arp" ? "square" : "triangle";
+    secondary.type = timbre === "harmonic-echo" ? "sine" : "triangle";
+    air.type = "sine";
+
+    primary.frequency.setValueAtTime(frequency, now);
+    secondary.frequency.setValueAtTime(
+      frequency *
+        (timbre === "arp" ? 1.5 : timbre === "harmonic-echo" ? 1.25 : 2.01),
+      now,
+    );
+    air.frequency.setValueAtTime(
+      frequency *
+        (timbre === "arp" ? 2.02 : timbre === "harmonic-echo" ? 0.5 : 2.5),
+      now,
+    );
+
+    primary.detune.value = timbre === "arp" ? -4 : -2;
+    secondary.detune.value = timbre === "harmonic-echo" ? 5 : 8;
+    air.detune.value = timbre === "shimmer" ? 14 : 2;
+
+    filter.type = timbre === "arp" ? "bandpass" : "lowpass";
+    filter.Q.value =
+      timbre === "arp" ? 4.4 : timbre === "harmonic-echo" ? 1.8 : 2.8;
+    filter.frequency.setValueAtTime(
+      (timbre === "arp" ? 1600 : timbre === "harmonic-echo" ? 920 : 1300) +
+        accent * 1600 +
+        brightness * 640,
+      now,
+    );
+    filter.frequency.exponentialRampToValueAtTime(
+      timbre === "harmonic-echo" ? 360 : timbre === "arp" ? 760 : 520,
+      now + duration,
+    );
+
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(
+      (timbre === "arp" ? 0.036 : timbre === "harmonic-echo" ? 0.03 : 0.033) +
+        accent * 0.052,
+      now + (timbre === "arp" ? 0.016 : 0.05),
+    );
+    gain.gain.exponentialRampToValueAtTime(
+      0.0001,
+      now + duration * (timbre === "arp" ? 0.8 : 1),
+    );
+
+    send.gain.value =
+      timbre === "harmonic-echo" ? 0.42 : timbre === "shimmer" ? 0.3 : 0.2;
+
+    primary.connect(filter);
+    secondary.connect(filter);
+    air.connect(filter);
+    filter.connect(gain);
+    gain.connect(engine.compressor);
+    gain.connect(send);
+    send.connect(engine.fxSend);
+
+    primary.start(now);
+    secondary.start(now);
+    air.start(now);
+    primary.stop(now + duration + 0.08);
+    secondary.stop(now + duration + 0.08);
+    air.stop(now + duration + 0.08);
+
+    if (timbre !== "arp") {
+      triggerNoiseBurst("echo", 0.08 + accent * 0.1, hue);
+    }
+  };
+
   const playChordPad = (chordSymbol: string, barNumber: number) => {
     const engine = soundRef.current;
     if (!engine.context || engine.muted) {
@@ -2066,6 +2440,113 @@ export function EchoSurface({
 
     pushFlash(point(0.5, 0.5, performance.now()), "pad", hue, 1.25, "bar");
     playCadenceResolution();
+  };
+
+  const triggerFusionVoice = (
+    firstSnapshot: ActiveLoopSnapshot,
+    secondSnapshot: ActiveLoopSnapshot,
+    overlapScore: number,
+    now: number,
+  ) => {
+    const [leftSnapshot, rightSnapshot] =
+      firstSnapshot.loop.id <= secondSnapshot.loop.id
+        ? [firstSnapshot, secondSnapshot]
+        : [secondSnapshot, firstSnapshot];
+    const pairKey = getFusionPairKey(
+      leftSnapshot.loop.id,
+      rightSnapshot.loop.id,
+    );
+    const harmonic = harmonicStateRef.current;
+    const existing = simulationRef.current.fusionVoices.find(
+      (voice) => voice.pairKey === pairKey,
+    );
+    const overlapPoint = point(
+      (leftSnapshot.head.x + rightSnapshot.head.x) * 0.5,
+      (leftSnapshot.head.y + rightSnapshot.head.y) * 0.5,
+      now,
+    );
+    const signature: FusionSignature = {
+      roles: [leftSnapshot.loop.role, rightSnapshot.loop.role],
+      hues: [leftSnapshot.loop.hue, rightSnapshot.loop.hue],
+      timbre: getFusionTimbre(leftSnapshot.loop.role, rightSnapshot.loop.role),
+    };
+    const blendedHue = mixHue(signature.hues[0], signature.hues[1], 0.5);
+    const headDistance = distance(leftSnapshot.head, rightSnapshot.head);
+    const strength = clamp(
+      overlapScore * 0.58 +
+        (1 - headDistance / FUSION_HEAD_DISTANCE) * 0.24 +
+        (leftSnapshot.noteAccent + rightSnapshot.noteAccent) * 0.14,
+      0.48,
+      1.14,
+    );
+    const midiRoot = clamp(
+      Math.round((leftSnapshot.midi + rightSnapshot.midi) * 0.5),
+      42,
+      90,
+    );
+
+    if (existing) {
+      existing.bornAt = now - existing.ttl * 0.18;
+      existing.point = overlapPoint;
+      existing.sourcePoints = [
+        leftSnapshot.head,
+        rightSnapshot.head,
+      ] as [NormalizedPoint, NormalizedPoint];
+      existing.midiRoot = midiRoot;
+      existing.strength = mix(existing.strength, strength, 0.4);
+      existing.signature = signature;
+      return;
+    }
+
+    const cooldownMs = getBeatMs(harmonic) * FUSION_COOLDOWN_BEATS;
+    const lastSpawnAt = fusionCooldownRef.current.get(pairKey) ?? -cooldownMs * 2;
+    if (now - lastSpawnAt < cooldownMs) {
+      return;
+    }
+
+    const ttl =
+      getBeatMs(harmonic) *
+      (signature.timbre === "arp"
+        ? 2.35
+        : signature.timbre === "harmonic-echo"
+          ? 3.4
+          : 2.9);
+
+    simulationRef.current.fusionVoices = [
+      ...simulationRef.current.fusionVoices,
+      {
+        id: fusionIdRef.current++,
+        bornAt: now,
+        ttl,
+        pairKey,
+        point: overlapPoint,
+        sourcePoints: [
+          leftSnapshot.head,
+          rightSnapshot.head,
+        ] as [NormalizedPoint, NormalizedPoint],
+        midiRoot,
+        strength,
+        motionSeed: Math.random() * TAU,
+        lastTriggeredToken: "",
+        signature,
+      },
+    ].slice(-MAX_FUSION_VOICES);
+
+    simulationRef.current.surfaceEnergy = clamp(
+      simulationRef.current.surfaceEnergy + 0.08 + strength * 0.06,
+      0.18,
+      1.22,
+    );
+    fusionCooldownRef.current.set(pairKey, now);
+    pushFlash(
+      overlapPoint,
+      leftSnapshot.loop.role,
+      blendedHue,
+      0.78 + strength * 0.16,
+      "note",
+      false,
+      signature,
+    );
   };
 
   const getPreviewMidi = (
@@ -2245,11 +2726,14 @@ export function EchoSurface({
     simulationRef.current.loops = snapshot.loops;
     simulationRef.current.flashes = snapshot.flashes;
     simulationRef.current.cadenceEvents = snapshot.cadenceEvents;
+    simulationRef.current.fusionVoices = snapshot.fusionVoices;
     simulationRef.current.recentGestures = [];
     simulationRef.current.surfaceEnergy = 0.3;
     simulationRef.current.activeTouches.clear();
     loopIdRef.current = snapshot.loops.length;
     flashIdRef.current = snapshot.flashes.length;
+    fusionIdRef.current = snapshot.fusionVoices.length;
+    fusionCooldownRef.current.clear();
     syncMemory();
     syncActiveCount();
   }, [preset]);
@@ -2632,7 +3116,11 @@ export function EchoSurface({
         const pixel = normalizedToPixels(flash.point, size);
         const age = now - flash.bornAt;
         const progress = clamp(age / flash.ttl, 0, 1);
-        const flashHue = flash.response ? RESPONSE_GLYPH_HUE : flash.hue;
+        const flashHue = flash.fusion
+          ? mixHue(flash.fusion.hues[0], flash.fusion.hues[1], 0.5)
+          : flash.response
+            ? RESPONSE_GLYPH_HUE
+            : flash.hue;
         const radius =
           (flash.kind === "bar" ? 24 : 12) +
           flash.strength * (flash.kind === "bar" ? 130 : 58) * easeOutCubic(progress);
@@ -2653,6 +3141,8 @@ export function EchoSurface({
           0,
           flash.kind === "bar"
             ? `hsla(${flash.hue}, 92%, 78%, ${alpha * 0.22})`
+            : flash.fusion
+              ? `hsla(${flashHue}, 96%, 84%, ${alpha * 0.28})`
             : flash.response
               ? `hsla(${flashHue}, 88%, 80%, ${alpha * 0.26})`
               : getRoleColor(flash.role, alpha * 0.24, 14, 8),
@@ -2661,13 +3151,17 @@ export function EchoSurface({
           0.54,
           flash.kind === "bar"
             ? `hsla(${flash.hue}, 86%, 62%, ${alpha * 0.1})`
+            : flash.fusion
+              ? `hsla(${flashHue}, 90%, 72%, ${alpha * 0.14})`
             : flash.response
               ? `hsla(${flashHue}, 82%, 68%, ${alpha * 0.12})`
               : getRoleColor(flash.role, alpha * 0.1, 0, 0),
         );
         gradient.addColorStop(
           1,
-          flash.response
+          flash.fusion
+            ? `hsla(${flashHue}, 88%, 68%, 0)`
+            : flash.response
             ? `hsla(${flashHue}, 82%, 68%, 0)`
             : getRoleColor(flash.role, 0, 0, 0),
         );
@@ -2677,17 +3171,32 @@ export function EchoSurface({
         context.arc(pixel.x, pixel.y, radius, 0, TAU);
         context.fill();
 
-        drawRoleGlyph(
-          context,
-          flash.role,
-          pixel.x,
-          pixel.y,
-          (flash.kind === "bar" ? 8.4 : 5.6) + flash.strength * 2.8,
-          alpha * (flash.kind === "bar" ? 0.9 : 1),
-          now * 0.0014,
-          flash.response ? flashHue : undefined,
-        );
+        if (flash.fusion) {
+          drawFusionGlyph(
+            context,
+            flash.fusion,
+            pixel.x,
+            pixel.y,
+            (flash.kind === "bar" ? 8.8 : 6.2) + flash.strength * 3,
+            alpha,
+            now * 0.0015,
+            1 - progress,
+          );
+        } else {
+          drawRoleGlyph(
+            context,
+            flash.role,
+            pixel.x,
+            pixel.y,
+            (flash.kind === "bar" ? 8.4 : 5.6) + flash.strength * 2.8,
+            alpha * (flash.kind === "bar" ? 0.9 : 1),
+            now * 0.0014,
+            flash.response ? flashHue : undefined,
+          );
+        }
       });
+
+      const activeLoopSnapshots: ActiveLoopSnapshot[] = [];
 
       state.loops.forEach((loop) => {
         const loopDurationMs = getBarMs(harmonic) * loop.loopBars;
@@ -2915,6 +3424,175 @@ export function EchoSurface({
             glyphBoost,
           );
         });
+
+        activeLoopSnapshots.push({
+          loop,
+          head,
+          retracePath,
+          midi: activeNote?.midi ?? getPreviewMidi(head, now, loop.role),
+          noteAccent: activeNote?.accent ?? 0.54,
+        });
+      });
+
+      state.fusionVoices = state.fusionVoices.filter(
+        (voice) => now - voice.bornAt < voice.ttl,
+      );
+
+      for (let index = 0; index < activeLoopSnapshots.length; index += 1) {
+        for (
+          let partnerIndex = index + 1;
+          partnerIndex < activeLoopSnapshots.length;
+          partnerIndex += 1
+        ) {
+          const firstSnapshot = activeLoopSnapshots[index];
+          const secondSnapshot = activeLoopSnapshots[partnerIndex];
+          const headGap = distance(firstSnapshot.head, secondSnapshot.head);
+
+          if (headGap > FUSION_HEAD_DISTANCE) {
+            continue;
+          }
+
+          const overlapScore = getPathOverlapScore(
+            firstSnapshot.retracePath,
+            secondSnapshot.retracePath,
+          );
+
+          if (overlapScore < FUSION_OVERLAP_THRESHOLD) {
+            continue;
+          }
+
+          triggerFusionVoice(firstSnapshot, secondSnapshot, overlapScore, now);
+        }
+      }
+
+      state.fusionVoices.forEach((fusion) => {
+        const age = now - fusion.bornAt;
+        const progress = clamp(age / fusion.ttl, 0, 0.9999);
+        const life = (1 - progress) ** 0.5;
+        const centerPixel = normalizedToPixels(fusion.point, size);
+        const sourcePixelA = normalizedToPixels(fusion.sourcePoints[0], size);
+        const sourcePixelB = normalizedToPixels(fusion.sourcePoints[1], size);
+        const blendedHue = mixHue(
+          fusion.signature.hues[0],
+          fusion.signature.hues[1],
+          0.5,
+        );
+        const bridge = context.createLinearGradient(
+          sourcePixelA.x,
+          sourcePixelA.y,
+          sourcePixelB.x,
+          sourcePixelB.y,
+        );
+        const bridgeBend =
+          Math.sin(now * 0.0024 + fusion.motionSeed) *
+          (10 + fusion.strength * 14 + cadenceGlow * 8);
+
+        bridge.addColorStop(
+          0,
+          `hsla(${fusion.signature.hues[0]}, 94%, 78%, ${
+            life * 0.18 * fusion.strength
+          })`,
+        );
+        bridge.addColorStop(
+          0.5,
+          `hsla(${blendedHue}, 98%, 84%, ${life * 0.32 * fusion.strength})`,
+        );
+        bridge.addColorStop(
+          1,
+          `hsla(${fusion.signature.hues[1]}, 94%, 78%, ${
+            life * 0.18 * fusion.strength
+          })`,
+        );
+        context.strokeStyle = bridge;
+        context.lineWidth = 1.6 + fusion.strength * 1.8 + cadenceGlow * 0.8;
+        context.beginPath();
+        context.moveTo(sourcePixelA.x, sourcePixelA.y);
+        context.quadraticCurveTo(
+          centerPixel.x,
+          centerPixel.y - bridgeBend,
+          sourcePixelB.x,
+          sourcePixelB.y,
+        );
+        context.stroke();
+
+        const haloRadius =
+          24 + fusion.strength * 26 + cadenceGlow * 10 + easeOutCubic(progress) * 22;
+        const halo = context.createRadialGradient(
+          centerPixel.x,
+          centerPixel.y,
+          0,
+          centerPixel.x,
+          centerPixel.y,
+          haloRadius,
+        );
+        halo.addColorStop(
+          0,
+          `hsla(${blendedHue}, 96%, 84%, ${life * 0.18 * fusion.strength})`,
+        );
+        halo.addColorStop(
+          0.56,
+          `hsla(${blendedHue}, 90%, 72%, ${life * 0.08 * fusion.strength})`,
+        );
+        halo.addColorStop(1, `hsla(${blendedHue}, 88%, 68%, 0)`);
+        context.fillStyle = halo;
+        context.beginPath();
+        context.arc(centerPixel.x, centerPixel.y, haloRadius, 0, TAU);
+        context.fill();
+
+        const pulseCount = getFusionPulseCount(fusion.signature.timbre);
+        const pulseIndex = Math.min(
+          pulseCount - 1,
+          Math.floor(progress * pulseCount),
+        );
+        const pulseToken = `${pulseIndex}`;
+
+        if (fusion.lastTriggeredToken !== pulseToken) {
+          const pulseAccent = clamp(
+            0.5 +
+              fusion.strength * 0.2 +
+              (pulseIndex === 0 ? 0.14 : 0) +
+              (fusion.signature.timbre === "arp" && pulseIndex % 2 === 0 ? 0.08 : 0),
+            0.48,
+            1,
+          );
+          const pulseMidi = getFusionMidi(
+            fusion,
+            pulseIndex,
+            harmonic,
+            chordSymbol,
+          );
+          playFusionTone({
+            midi: pulseMidi,
+            hue: blendedHue,
+            accent: pulseAccent,
+            durationMs: getFusionPulseDurationMs(
+              fusion.signature.timbre,
+              harmonic,
+            ),
+            timbre: fusion.signature.timbre,
+          });
+          pushFlash(
+            fusion.point,
+            fusion.signature.roles[0],
+            blendedHue,
+            0.74 + pulseAccent * 0.18,
+            "note",
+            false,
+            fusion.signature,
+          );
+          fusion.lastTriggeredToken = pulseToken;
+        }
+
+        drawFusionGlyph(
+          context,
+          fusion.signature,
+          centerPixel.x,
+          centerPixel.y,
+          8 + fusion.strength * 4 + cadenceGlow * 2,
+          life * (0.78 + cadenceGlow * 0.12),
+          now * 0.0018 + fusion.motionSeed,
+          1 - progress,
+        );
       });
 
       for (const touch of state.activeTouches.values()) {
@@ -3060,8 +3738,10 @@ export function EchoSurface({
     simulationRef.current.loops = [];
     simulationRef.current.flashes = [];
     simulationRef.current.cadenceEvents = [];
+    simulationRef.current.fusionVoices = [];
     simulationRef.current.recentGestures = [];
     simulationRef.current.surfaceEnergy = 0.16;
+    fusionCooldownRef.current.clear();
     lastInteractionAtRef.current = performance.now();
     syncMemory();
     syncActiveCount();
