@@ -5,13 +5,13 @@ const guideSteps = [
     title: "1. Summon a voice",
     image: withBase("guide/seed.png"),
     alt: "Screenshot of Echo Surface showing luminous role-colored phrases suspended over a ritual-like score.",
-    text: "The surface infers role from gesture. Long smooth drags feel like pads, long holds become bass, clustered taps read as percussion, zigzags turn into leads, and circles wake echo voices.",
+    text: "The surface infers role from gesture by default. Long smooth drags feel like pads, long holds become bass, clustered taps read as percussion, zigzags turn into leads, and circles wake echo voices. A tiny role seal can override just the next contour when you want to place a voice deliberately.",
   },
   {
     title: "2. Let the rite unfold",
     image: withBase("guide/trace.png"),
     alt: "Screenshot of Echo Surface with several inferred voices weaving across the same harmonic field.",
-    text: "Harmony still moves underneath everything on a shared bar clock, but now each voice has its own density, color, glyph, and motion inside the same enchanted frame.",
+    text: "Harmony still moves underneath everything on a shared bar clock, and now a compact progression strip lets you steer the harmonic cycle without turning the surface into a dashboard.",
   },
   {
     title: "3. Read the living score",

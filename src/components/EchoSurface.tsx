@@ -18,6 +18,7 @@ type ActiveTouch = {
   bornAt: number;
   lastSampleAt: number;
   hue: number;
+  previewRole: VoiceRole | null;
   points: NormalizedPoint[];
   travel: number;
 };
@@ -50,6 +51,12 @@ type VoiceRoleStyle = {
   glyph: "circle" | "square" | "star" | "diamond" | "wave";
   palette: RolePalette;
   motion: RoleMotion;
+};
+
+type ProgressionOption = {
+  id: string;
+  label: string;
+  progression: string[];
 };
 
 type RecentGesture = {
@@ -141,6 +148,7 @@ type MemoryChip = {
 };
 
 type ToneVoice = VoiceRole | "touch" | "bar";
+type VoiceRoleOverride = VoiceRole | "auto";
 
 export type SurfacePreset = "seed" | "trace" | "hold";
 
@@ -200,6 +208,35 @@ const VOICE_ROLE_STYLES: Record<VoiceRole, VoiceRoleStyle> = {
     motion: "orbit",
   },
 };
+const VOICE_ROLE_ORDER: VoiceRole[] = [
+  "pad",
+  "bass",
+  "lead",
+  "percussion",
+  "echo",
+];
+const PROGRESSION_OPTIONS: ProgressionOption[] = [
+  {
+    id: "cadence",
+    label: "Cadence",
+    progression: ["I", "IV", "V", "I"],
+  },
+  {
+    id: "lift",
+    label: "Lift",
+    progression: ["I", "V", "vi", "IV"],
+  },
+  {
+    id: "orbit",
+    label: "Orbit",
+    progression: ["vi", "IV", "I", "V"],
+  },
+  {
+    id: "turn",
+    label: "Turn",
+    progression: ["ii", "V", "I", "vi"],
+  },
+];
 const MODE_INTERVALS = {
   major: [0, 2, 4, 5, 7, 9, 11],
   minor: [0, 2, 3, 5, 7, 8, 10],
@@ -1121,6 +1158,36 @@ const getLoopHue = (role: VoiceRole) => {
   return palette.hue;
 };
 
+const formatVoiceRoleLabel = (role: VoiceRole) => {
+  switch (role) {
+    case "pad":
+      return "Pad";
+    case "bass":
+      return "Bass";
+    case "lead":
+      return "Lead";
+    case "percussion":
+      return "Perc";
+    case "echo":
+      return "Echo";
+  }
+};
+
+const getVoiceRoleGlyphLabel = (role: VoiceRole) => {
+  switch (role) {
+    case "pad":
+      return "◯";
+    case "bass":
+      return "◼";
+    case "lead":
+      return "✦";
+    case "percussion":
+      return "⟡";
+    case "echo":
+      return "~";
+  }
+};
+
 const drawRoleGlyph = (
   context: CanvasRenderingContext2D,
   role: VoiceRole,
@@ -1422,10 +1489,14 @@ export function EchoSurface({
   const lastInteractionAtRef = useRef(performance.now());
   const flashIdRef = useRef(0);
   const loopIdRef = useRef(0);
+  const nextRoleOverrideRef = useRef<VoiceRoleOverride>("auto");
   const [harmonicState, setHarmonicState] = useState(DEFAULT_HARMONIC_STATE);
   const [memory, setMemory] = useState<MemoryChip[]>([]);
   const [activeCount, setActiveCount] = useState(0);
   const [isMuted, setIsMuted] = useState(false);
+  const [progressionIndex, setProgressionIndex] = useState(0);
+  const [nextRoleOverride, setNextRoleOverride] =
+    useState<VoiceRoleOverride>("auto");
 
   const currentChord = useMemo(
     () => getChordForBar(harmonicState.currentBar, harmonicState),
@@ -1439,7 +1510,9 @@ export function EchoSurface({
   const whisperLabel =
     activeCount > 0
       ? "long drag pad • hold bass • tap cluster percussion • zigzag lead • circle echo"
-      : "draw a phrase and let the surface infer the voice";
+      : nextRoleOverride === "auto"
+        ? "draw a phrase and let the surface infer the voice"
+        : `next contour sealed as ${formatVoiceRoleLabel(nextRoleOverride)}`;
 
   const syncMemory = () => {
     setMemory(
@@ -1759,13 +1832,27 @@ export function EchoSurface({
     });
   };
 
-  const getPreviewMidi = (pointValue: NormalizedPoint, timeMs: number) => {
+  const getPreviewMidi = (
+    pointValue: NormalizedPoint,
+    timeMs: number,
+    roleHint?: VoiceRole | null,
+  ) => {
     const harmonic = harmonicStateRef.current;
     const barNumber = getBarNumberAtTime(timeMs, clockStartMsRef.current, harmonic);
     const chordSymbol = getChordForBar(barNumber, harmonic);
     const scale = buildExtendedScaleMidis(harmonic);
     const chordPitchClasses = getChordPitchClasses(harmonic, chordSymbol);
-    const target = clamp(Math.round(78 - pointValue.y * 24), 56, 84);
+    const roleOffset =
+      roleHint === "bass"
+        ? -24
+        : roleHint === "pad"
+          ? -8
+          : roleHint === "lead"
+            ? 6
+            : roleHint === "echo"
+              ? 2
+              : 0;
+    const target = clamp(Math.round(78 - pointValue.y * 24 + roleOffset), 40, 88);
 
     return scale[findNearestChordToneIndex(scale, target, chordPitchClasses)];
   };
@@ -1790,7 +1877,7 @@ export function EchoSurface({
       gestureDurationMs,
       simulationRef.current.recentGestures,
     );
-    const role = inferred.role;
+    const role = touch.previewRole ?? inferred.role;
     const contourPoints = shapePointsForRole(role, relativePoints, inferred.summary);
     const harmonic = harmonicStateRef.current;
     const currentBarIndex = getBarIndexAtTime(now, clockStartMsRef.current, harmonic);
@@ -1840,7 +1927,7 @@ export function EchoSurface({
 
     pushFlash(endPoint, role, roleHue, 0.84, "touch");
     playMelodicTone({
-      midi: getPreviewMidi(endPoint, now),
+      midi: getPreviewMidi(endPoint, now, role),
       hue: roleHue,
       accent: role === "bass" ? 0.92 : role === "percussion" ? 0.64 : 0.76,
       durationMs:
@@ -1849,8 +1936,16 @@ export function EchoSurface({
       voice: role === "percussion" ? "percussion" : role === "bass" ? "bass" : "touch",
     });
 
+    if (touch.previewRole) {
+      selectNextRoleOverride("auto");
+    }
+
     syncMemory();
   };
+
+  useEffect(() => {
+    nextRoleOverrideRef.current = nextRoleOverride;
+  }, [nextRoleOverride]);
 
   useEffect(() => {
     if (!preset) {
@@ -2405,25 +2500,30 @@ export function EchoSurface({
 
     const now = performance.now();
     const pointValue = makeSurfacePoint(event, surface, now);
-    const hue = chooseHue(pointValue, simulationRef.current.loops.length);
+    const previewRole =
+      nextRoleOverrideRef.current === "auto" ? null : nextRoleOverrideRef.current;
+    const hue = previewRole
+      ? getLoopHue(previewRole)
+      : chooseHue(pointValue, simulationRef.current.loops.length);
 
     simulationRef.current.activeTouches.set(event.pointerId, {
       pointerId: event.pointerId,
       bornAt: now,
       lastSampleAt: now,
       hue,
+      previewRole,
       points: [pointValue],
       travel: 0,
     });
     lastInteractionAtRef.current = now;
     syncActiveCount();
-    pushFlash(pointValue, "lead", hue, 0.62, "touch");
+    pushFlash(pointValue, previewRole ?? "lead", hue, 0.62, "touch");
     playMelodicTone({
-      midi: getPreviewMidi(pointValue, now),
+      midi: getPreviewMidi(pointValue, now, previewRole),
       hue,
       accent: 0.44,
       durationMs: getBeatMs(harmonicStateRef.current) * 0.34,
-      voice: "touch",
+      voice: previewRole ?? "touch",
     });
   };
 
@@ -2494,6 +2594,25 @@ export function EchoSurface({
     setIsMuted(soundRef.current.muted);
   };
 
+  const selectProgression = (index: number) => {
+    const option = PROGRESSION_OPTIONS[index];
+    const nextState = {
+      ...harmonicStateRef.current,
+      progression: option.progression,
+    };
+
+    harmonicStateRef.current = nextState;
+    setHarmonicState(nextState);
+    setProgressionIndex(index);
+    lastInteractionAtRef.current = performance.now();
+  };
+
+  const selectNextRoleOverride = (value: VoiceRoleOverride) => {
+    nextRoleOverrideRef.current = value;
+    setNextRoleOverride(value);
+    lastInteractionAtRef.current = performance.now();
+  };
+
   const stopSurfaceGesture = (event: { stopPropagation: () => void }) => {
     event.stopPropagation();
   };
@@ -2556,25 +2675,92 @@ export function EchoSurface({
           </div>
 
           {!captureMode ? (
-            <div
-              className="surface-controls"
-              onClick={stopSurfaceGesture}
-              onPointerCancel={stopSurfaceGesture}
-              onPointerDown={stopSurfaceGesture}
-              onPointerMove={stopSurfaceGesture}
-              onPointerUp={stopSurfaceGesture}
-            >
-              <button className="surface-tool" type="button" onClick={toggleMuted}>
-                {isMuted ? "Sound off" : "Sound on"}
-              </button>
-              <button
-                className="surface-tool surface-tool--soft"
-                type="button"
-                onClick={clearSurface}
+            <>
+              <div
+                className="surface-progression-strip"
+                onClick={stopSurfaceGesture}
+                onPointerCancel={stopSurfaceGesture}
+                onPointerDown={stopSurfaceGesture}
+                onPointerMove={stopSurfaceGesture}
+                onPointerUp={stopSurfaceGesture}
               >
-                Clear
-              </button>
-            </div>
+                {PROGRESSION_OPTIONS.map((option, index) => (
+                  <button
+                    key={option.id}
+                    className={`surface-mini-chip${
+                      progressionIndex === index ? " surface-mini-chip--active" : ""
+                    }`}
+                    type="button"
+                    onClick={() => selectProgression(index)}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+
+              <div
+                className="surface-role-palette"
+                onClick={stopSurfaceGesture}
+                onPointerCancel={stopSurfaceGesture}
+                onPointerDown={stopSurfaceGesture}
+                onPointerMove={stopSurfaceGesture}
+                onPointerUp={stopSurfaceGesture}
+              >
+                <button
+                  className={`surface-role-chip${
+                    nextRoleOverride === "auto" ? " surface-role-chip--active" : ""
+                  }`}
+                  type="button"
+                  onClick={() => selectNextRoleOverride("auto")}
+                >
+                  <span className="surface-role-chip__glyph">Auto</span>
+                </button>
+
+                {VOICE_ROLE_ORDER.map((role) => (
+                  <button
+                    key={role}
+                    className={`surface-role-chip${
+                      nextRoleOverride === role ? " surface-role-chip--active" : ""
+                    }`}
+                    type="button"
+                    onClick={() => selectNextRoleOverride(role)}
+                    title={`Next contour: ${formatVoiceRoleLabel(role)}`}
+                    style={
+                      {
+                        "--role-hue": `${getLoopHue(role)}`,
+                      } as CSSProperties
+                    }
+                  >
+                    <span className="surface-role-chip__glyph">
+                      {getVoiceRoleGlyphLabel(role)}
+                    </span>
+                    <span className="surface-role-chip__label">
+                      {formatVoiceRoleLabel(role)}
+                    </span>
+                  </button>
+                ))}
+              </div>
+
+              <div
+                className="surface-controls"
+                onClick={stopSurfaceGesture}
+                onPointerCancel={stopSurfaceGesture}
+                onPointerDown={stopSurfaceGesture}
+                onPointerMove={stopSurfaceGesture}
+                onPointerUp={stopSurfaceGesture}
+              >
+                <button className="surface-tool" type="button" onClick={toggleMuted}>
+                  {isMuted ? "Sound off" : "Sound on"}
+                </button>
+                <button
+                  className="surface-tool surface-tool--soft"
+                  type="button"
+                  onClick={clearSurface}
+                >
+                  Clear
+                </button>
+              </div>
+            </>
           ) : null}
 
           {!captureMode ? (

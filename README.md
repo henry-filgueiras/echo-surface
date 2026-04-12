@@ -26,6 +26,7 @@ Then open the local Vite URL in a browser and play with the surface using mouse 
 - Notes are quantized to the active scale instead of mapped directly to raw frequencies.
 - Stable landing points bias toward active chord tones as the progression cycles.
 - Long smooth drags become pads, long holds become bass drones, clustered taps wake percussion, sharp zigzags become leads, and circular motion opens echo or FX voices.
+- A subtle progression strip can retune the harmonic loop, and a one-shot role palette can seal the next contour to a specific voice when needed.
 - Playback visibly retraces each contour with luminous transient glyphs at note events.
 
 ## Bootstrap

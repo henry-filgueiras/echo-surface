@@ -221,6 +221,8 @@ h2 {
 }
 
 .surface-cockpit,
+.surface-progression-strip,
+.surface-role-palette,
 .surface-controls,
 .surface-whisper {
   position: absolute;
@@ -311,13 +313,97 @@ h2 {
 }
 
 .surface-controls {
-  right: 1rem;
   bottom: 1rem;
   right: 1rem;
   display: flex;
   gap: 0.45rem;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.surface-progression-strip {
+  top: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  justify-content: center;
+  max-width: calc(100% - 24rem);
+}
+
+.surface-role-palette {
+  left: 1rem;
+  bottom: 1rem;
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  max-width: min(34rem, calc(100% - 12rem));
+}
+
+.surface-mini-chip,
+.surface-role-chip {
+  appearance: none;
+  border: 1px solid rgba(243, 228, 206, 0.1);
+  background: rgba(7, 18, 25, 0.22);
+  color: rgba(243, 233, 215, 0.76);
+  border-radius: 999px;
+  cursor: pointer;
+  backdrop-filter: blur(10px);
+  transition:
+    background-color 180ms ease,
+    border-color 180ms ease,
+    transform 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.surface-mini-chip {
+  padding: 0.38rem 0.62rem;
+  font-family: "Avenir Next Condensed", "Franklin Gothic Medium", "Arial Narrow", sans-serif;
+  font-size: 0.66rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.surface-role-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.34rem;
+  padding: 0.36rem 0.58rem;
+  font-family: "Avenir Next Condensed", "Franklin Gothic Medium", "Arial Narrow", sans-serif;
+  font-size: 0.66rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.surface-mini-chip:hover,
+.surface-role-chip:hover {
+  transform: translateY(-1px);
+  background: rgba(7, 18, 25, 0.34);
+  border-color: rgba(243, 228, 206, 0.18);
+}
+
+.surface-mini-chip--active {
+  background: rgba(114, 208, 200, 0.14);
+  border-color: rgba(114, 208, 200, 0.22);
+  color: rgba(225, 250, 247, 0.92);
+  box-shadow: 0 0 18px rgba(114, 208, 200, 0.12);
+}
+
+.surface-role-chip--active {
+  background: hsla(var(--role-hue, 190), 84%, 66%, 0.14);
+  border-color: hsla(var(--role-hue, 190), 86%, 70%, 0.28);
+  color: rgba(247, 243, 234, 0.94);
+  box-shadow: 0 0 18px hsla(var(--role-hue, 190), 84%, 64%, 0.14);
+}
+
+.surface-role-chip__glyph {
+  font-size: 0.8rem;
+  line-height: 1;
+}
+
+.surface-role-chip__label {
+  line-height: 1;
 }
 
 .surface-tool {
@@ -477,13 +563,30 @@ h2 {
     min-width: min(11rem, calc(100% - 2rem));
   }
 
+  .surface-progression-strip {
+    top: auto;
+    left: 1rem;
+    right: 1rem;
+    bottom: 7.2rem;
+    transform: none;
+    justify-content: flex-start;
+    max-width: none;
+  }
+
+  .surface-role-palette {
+    left: 1rem;
+    right: 1rem;
+    bottom: 4.4rem;
+    max-width: none;
+  }
+
   .surface-controls {
     top: auto;
     bottom: 0.85rem;
-    left: 1rem;
+    left: auto;
     right: 1rem;
     width: auto;
-    justify-content: flex-start;
+    justify-content: flex-end;
   }
 
   .memory-strip {
@@ -491,7 +594,7 @@ h2 {
   }
 
   .surface-whisper {
-    bottom: 3.9rem;
+    bottom: 10.2rem;
     width: calc(100% - 2rem);
     padding-inline: 0.75rem;
   }
@@ -518,11 +621,21 @@ h2 {
   }
 
   .surface-cockpit,
+  .surface-progression-strip,
+  .surface-role-palette,
   .surface-controls,
   .surface-hud {
     left: 0.75rem;
     right: 0.75rem;
     width: auto;
+  }
+
+  .surface-progression-strip {
+    bottom: 8rem;
+  }
+
+  .surface-role-palette {
+    bottom: 4.9rem;
   }
 
   .surface-hud {
@@ -531,7 +644,7 @@ h2 {
   }
 
   .surface-whisper {
-    bottom: 3.8rem;
+    bottom: 11.4rem;
     width: calc(100% - 1.5rem);
     padding-inline: 0.75rem;
   }
