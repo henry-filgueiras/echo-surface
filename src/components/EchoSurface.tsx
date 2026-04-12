@@ -21,6 +21,8 @@ type ActiveTouch = {
   previewRole: VoiceRole | null;
   points: NormalizedPoint[];
   travel: number;
+  /** true when this pointer is consumed by a two-finger pinch gesture */
+  isPinch: boolean;
 };
 
 export type HarmonicState = {
@@ -161,6 +163,8 @@ type ContourLoop = {
   loopiness: number;
   reversalRatio: number;
   forwardBias: number;
+  /** ID of the scope this loop was created inside, null = root */
+  scopeId: ScopeId | null;
 };
 
 type PlaybackFlash = {
@@ -483,6 +487,155 @@ const SCENE_EARLY_TRIGGER_MIN_ROLES = 3;
 const SCENE_EARLY_TRIGGER_GESTURE_WINDOW_BARS = 2;
 /** Minimum recent gestures in that window for early trigger */
 const SCENE_EARLY_TRIGGER_MIN_GESTURES = 3;
+
+// ---------------------------------------------------------------------------
+// Scope / hierarchical composition space
+// ---------------------------------------------------------------------------
+
+type ScopeId = number;
+
+/** Optional per-scope overrides that shadow the global harmonic context */
+type ScopeOverrides = Partial<{
+  tonic: string;
+  mode: "major" | "minor";
+  bpm: number;
+  progressionId: string; // references PROGRESSION_OPTIONS id
+  scene: SceneName;
+}>;
+
+/** A softly bounded elliptical musical world */
+type ScopeRecord = {
+  id: ScopeId;
+  parentId: ScopeId | null;
+  childIds: ScopeId[];
+  /** Ellipse centre in normalised 0-1 surface space */
+  cx: number;
+  cy: number;
+  /** Semi-axes in normalised 0-1 surface space */
+  rx: number;
+  ry: number;
+  hue: number;
+  label: string;
+  overrides: ScopeOverrides;
+  /** IDs of ContourLoops whose centroid fell inside this scope */
+  loopIds: number[];
+  bornAt: number;
+};
+
+/** Camera / semantic-zoom state – all in normalised 0-1 world space */
+type CameraState = {
+  /** World-space centre point of the viewport */
+  viewCx: number;
+  viewCy: number;
+  zoom: number; // 1 = full canvas
+  /** Smooth-interpolation targets */
+  targetViewCx: number;
+  targetViewCy: number;
+  targetZoom: number;
+  /** Which scope (if any) the camera is currently focused inside */
+  focusScopeId: ScopeId | null;
+};
+
+/** Tracks an in-progress two-pointer pinch gesture */
+type PinchTracker = {
+  id0: number;
+  id1: number;
+  lastDist: number; // normalised screen distance
+  lastMidX: number; // normalised screen midpoint
+  lastMidY: number;
+} | null;
+
+// Scope gesture detection thresholds
+const SCOPE_GESTURE_MIN_CIRCULARITY = 0.70;
+const SCOPE_GESTURE_MIN_LOOPINESS = 0.62;
+const SCOPE_GESTURE_MIN_TRAVEL = 0.46;
+const SCOPE_GESTURE_CLOSE_THRESHOLD = 0.18; // first↔last point distance
+const SCOPE_GESTURE_MIN_DURATION_MS = 900;
+const SCOPE_MIN_RADIUS = 0.07;
+const SCOPE_MAX_ZOOM = 8;
+const SCOPE_ZOOM_ENTER_MARGIN = 0.22; // extra space around scope when entering
+const SCOPE_ZOOM_LERP_SPEED = 0.072;
+
+const SCOPE_LABEL_POOL = [
+  "grove", "ring", "hollow", "veil",
+  "basin", "crown", "field", "bloom",
+  "pocket", "vortex", "arc", "haven",
+  "well", "orbit", "glyph", "echo",
+];
+
+// ---------------------------------------------------------------------------
+// Scope helper functions (pure, module-level)
+// ---------------------------------------------------------------------------
+
+/** Return the innermost (smallest-area) scope whose ellipse contains (x, y) */
+const findScopeAt = (
+  x: number,
+  y: number,
+  scopes: ScopeRecord[],
+): ScopeRecord | null => {
+  const containing = scopes.filter((s) => {
+    const dx = (x - s.cx) / Math.max(s.rx, 0.001);
+    const dy = (y - s.cy) / Math.max(s.ry, 0.001);
+    return dx * dx + dy * dy <= 1;
+  });
+  if (containing.length === 0) return null;
+  return containing.reduce((best, s) =>
+    s.rx * s.ry < best.rx * best.ry ? s : best,
+  );
+};
+
+/** Walk up the scope tree and merge overrides (inner wins) into a resolved
+ *  harmonic context + scene name.  All values default to root-level state. */
+const resolveEffectiveScopeContext = (
+  scopeId: ScopeId | null,
+  scopes: ScopeRecord[],
+  baseHarmonic: HarmonicState,
+  baseScene: SceneName,
+): { harmonic: HarmonicState; scene: SceneName } => {
+  const chain: ScopeRecord[] = [];
+  let currentId: ScopeId | null = scopeId;
+  while (currentId !== null) {
+    const scope = scopes.find((s) => s.id === currentId);
+    if (!scope) break;
+    chain.unshift(scope); // root → leaf order
+    currentId = scope.parentId;
+  }
+
+  let harmonic = { ...baseHarmonic };
+  let scene = baseScene;
+
+  for (const scope of chain) {
+    const ov = scope.overrides;
+    if (ov.tonic !== undefined) harmonic = { ...harmonic, tonic: ov.tonic };
+    if (ov.mode !== undefined) harmonic = { ...harmonic, mode: ov.mode };
+    if (ov.bpm !== undefined) harmonic = { ...harmonic, bpm: ov.bpm };
+    if (ov.progressionId !== undefined) {
+      const prog = PROGRESSION_OPTIONS.find((p) => p.id === ov.progressionId);
+      if (prog) harmonic = { ...harmonic, progression: prog.progression };
+    }
+    if (ov.scene !== undefined) scene = ov.scene;
+  }
+
+  return { harmonic, scene };
+};
+
+/**
+ * Convert normalised screen coordinates (0-1 relative to canvas element) into
+ * normalised world coordinates, accounting for the camera transform.
+ *
+ * Inverse of the canvas context transform applied in frame():
+ *   screenX = (worldX - viewCx) * zoom * W + W/2
+ *   → worldX = (screenX - W/2) / (zoom * W) + viewCx
+ *          = (screenNormX - 0.5) / zoom + viewCx
+ */
+const screenToWorld = (
+  screenNormX: number,
+  screenNormY: number,
+  camera: CameraState,
+): [number, number] => [
+  (screenNormX - 0.5) / camera.zoom + camera.viewCx,
+  (screenNormY - 0.5) / camera.zoom + camera.viewCy,
+];
 
 // ---------------------------------------------------------------------------
 
@@ -2381,6 +2534,7 @@ const createLoopRecord = ({
   landingBias = 0,
   rhythmField,
   summary,
+  scopeId = null,
 }: {
   id: number;
   bornAt: number;
@@ -2397,6 +2551,7 @@ const createLoopRecord = ({
   landingBias?: number;
   rhythmField?: RhythmAttractionField;
   summary?: GestureSummary;
+  scopeId?: ScopeId | null;
 }): ContourLoop => {
   const contour = analyzeContour(points);
   const gestureSummary =
@@ -2429,6 +2584,7 @@ const createLoopRecord = ({
     loopiness: gestureSummary.loopiness,
     reversalRatio: gestureSummary.reversalRatio,
     forwardBias: gestureSummary.forwardBias,
+    scopeId,
   };
 };
 
@@ -2849,14 +3005,18 @@ const makeSurfacePoint = (
   event: ReactPointerEvent<HTMLDivElement>,
   element: HTMLDivElement,
   time: number,
+  camera?: CameraState,
 ) => {
   const bounds = element.getBoundingClientRect();
+  const screenNormX = clamp((event.clientX - bounds.left) / bounds.width, 0, 1);
+  const screenNormY = clamp((event.clientY - bounds.top) / bounds.height, 0, 1);
 
-  return point(
-    clamp((event.clientX - bounds.left) / bounds.width, 0, 1),
-    clamp((event.clientY - bounds.top) / bounds.height, 0, 1),
-    time,
-  );
+  if (!camera || camera.zoom === 1) {
+    return point(screenNormX, screenNormY, time);
+  }
+
+  const [worldX, worldY] = screenToWorld(screenNormX, screenNormY, camera);
+  return point(worldX, worldY, time);
 };
 
 const createPresetState = (
@@ -3035,6 +3195,15 @@ export function EchoSurface({
   const sceneSeqIndexRef = useRef(0);
   const sceneNameRef = useRef<SceneName>("verse");
   const sceneStartBarRef = useRef(1);
+  // Scope / hierarchical composition space
+  const scopeIdCounterRef = useRef(0);
+  const scopesRef = useRef<ScopeRecord[]>([]);
+  const cameraRef = useRef<CameraState>({
+    viewCx: 0.5, viewCy: 0.5, zoom: 1,
+    targetViewCx: 0.5, targetViewCy: 0.5, targetZoom: 1,
+    focusScopeId: null,
+  });
+  const pinchRef = useRef<PinchTracker>(null);
   const [harmonicState, setHarmonicState] = useState(DEFAULT_HARMONIC_STATE);
   const [memory, setMemory] = useState<MemoryChip[]>([]);
   const [activeCount, setActiveCount] = useState(0);
@@ -3044,6 +3213,8 @@ export function EchoSurface({
     useState<VoiceRoleOverride>("auto");
   const [callResponseEnabled, setCallResponseEnabled] = useState(true);
   const [currentScene, setCurrentScene] = useState<SceneName>("verse");
+  const [scopes, setScopes] = useState<ScopeRecord[]>([]);
+  const [focusScopeId, setFocusScopeId] = useState<ScopeId | null>(null);
 
   const currentChord = useMemo(
     () => getChordForBar(harmonicState.currentBar, harmonicState),
@@ -3673,6 +3844,83 @@ export function EchoSurface({
     return scale[findNearestChordToneIndex(scale, target, chordPitchClasses)];
   };
 
+  // ---------------------------------------------------------------------------
+  // Scope management
+  // ---------------------------------------------------------------------------
+
+  const spawnScope = (
+    rawPoints: NormalizedPoint[],
+    summary: GestureSummary,
+  ) => {
+    const bounds = getGestureBounds(rawPoints);
+    const cx = (bounds.minX + bounds.maxX) * 0.5;
+    const cy = (bounds.minY + bounds.maxY) * 0.5;
+    const rx = Math.max((bounds.maxX - bounds.minX) * 0.5, SCOPE_MIN_RADIUS);
+    const ry = Math.max((bounds.maxY - bounds.minY) * 0.5, SCOPE_MIN_RADIUS);
+
+    const parentScope = findScopeAt(cx, cy, scopesRef.current);
+    // Hue derived from position + current count, distinct from voice hues
+    const hue = modulo(cx * 200 + cy * 130 + scopeIdCounterRef.current * 61, 360);
+    const labelIndex = scopeIdCounterRef.current % SCOPE_LABEL_POOL.length;
+    const label = SCOPE_LABEL_POOL[labelIndex];
+
+    const newScope: ScopeRecord = {
+      id: scopeIdCounterRef.current++,
+      parentId: parentScope?.id ?? null,
+      childIds: [],
+      cx, cy, rx, ry,
+      hue,
+      label,
+      overrides: {},
+      loopIds: [],
+      bornAt: performance.now(),
+    };
+
+    if (parentScope) {
+      parentScope.childIds.push(newScope.id);
+    }
+
+    const nextScopes = [...scopesRef.current, newScope];
+    scopesRef.current = nextScopes;
+    setScopes(nextScopes);
+
+    // Brief impact flash at scope center
+    pushFlash(point(cx, cy, performance.now()), "echo", hue, 1.1, "bar");
+  };
+
+  const enterScope = (scopeId: ScopeId) => {
+    const scope = scopesRef.current.find((s) => s.id === scopeId);
+    if (!scope) return;
+
+    const margin = SCOPE_ZOOM_ENTER_MARGIN;
+    const targetZoom = 1 / (Math.max(scope.rx, scope.ry) * 2 + margin);
+    const clampedZoom = clamp(targetZoom, 1, SCOPE_MAX_ZOOM);
+
+    cameraRef.current.targetViewCx = scope.cx;
+    cameraRef.current.targetViewCy = scope.cy;
+    cameraRef.current.targetZoom = clampedZoom;
+    cameraRef.current.focusScopeId = scopeId;
+    setFocusScopeId(scopeId);
+  };
+
+  const exitScope = () => {
+    const cam = cameraRef.current;
+    const current = scopesRef.current.find((s) => s.id === cam.focusScopeId);
+
+    if (current?.parentId !== null && current?.parentId !== undefined) {
+      enterScope(current.parentId);
+    } else {
+      // Return to root view
+      cam.targetViewCx = 0.5;
+      cam.targetViewCy = 0.5;
+      cam.targetZoom = 1;
+      cam.focusScopeId = null;
+      setFocusScopeId(null);
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+
   const createResponseLoop = (sourceLoop: ContourLoop, seed: number) => {
     const harmonic = harmonicStateRef.current;
     const responseRole = getResponseRole(sourceLoop.role, seed);
@@ -3740,11 +3988,41 @@ export function EchoSurface({
     simulationRef.current.activeTouches.delete(pointerId);
     syncActiveCount();
 
+    // Skip finalization for pinch participants – they drove the camera
+    if (touch.isPinch) {
+      return;
+    }
+
     const relativePoints = touch.points.map((current) =>
       point(current.x, current.y, current.t - touch.bornAt),
     );
     const now = performance.now();
     const gestureDurationMs = Math.max(now - touch.bornAt, pathDuration(relativePoints), 1);
+
+    // ---- Scope creation gesture detection ----
+    // Large, slow, closed-loop circular draw → spawn a new musical scope instead of a voice
+    if (
+      touch.points.length >= 4 &&
+      gestureDurationMs >= SCOPE_GESTURE_MIN_DURATION_MS &&
+      !touch.previewRole // let explicit role seals still create voices
+    ) {
+      const summary = summarizeGesture(relativePoints, gestureDurationMs, []);
+      const firstWorld = touch.points[0];
+      const lastWorld = touch.points[touch.points.length - 1];
+      const closureDistance = distance(firstWorld, lastWorld);
+
+      if (
+        summary.circularity >= SCOPE_GESTURE_MIN_CIRCULARITY &&
+        summary.loopiness >= SCOPE_GESTURE_MIN_LOOPINESS &&
+        summary.travel >= SCOPE_GESTURE_MIN_TRAVEL &&
+        closureDistance <= SCOPE_GESTURE_CLOSE_THRESHOLD
+      ) {
+        spawnScope(touch.points, summary);
+        return; // do not create a voice phrase
+      }
+    }
+    // ---- end scope gesture ----
+
     const inferred = inferVoiceRole(
       relativePoints,
       gestureDurationMs,
@@ -3756,7 +4034,20 @@ export function EchoSurface({
       relativePoints,
       inferred.summary,
     );
-    const harmonic = harmonicStateRef.current;
+
+    // Resolve effective harmonic context from innermost scope
+    const gestureCentroid = inferred.summary.centroid;
+    const scopeForGesture = findScopeAt(
+      gestureCentroid.x, gestureCentroid.y, scopesRef.current,
+    );
+    const { harmonic: effectiveHarmonic } = resolveEffectiveScopeContext(
+      scopeForGesture?.id ?? null,
+      scopesRef.current,
+      harmonicStateRef.current,
+      sceneNameRef.current,
+    );
+
+    const harmonic = effectiveHarmonic;
     const currentBarIndex = getBarIndexAtTime(now, clockStartMsRef.current, harmonic);
     const nextBarStartMs =
       clockStartMsRef.current + (currentBarIndex + 1) * getBarMs(harmonic);
@@ -3801,7 +4092,12 @@ export function EchoSurface({
       clusterSize: inferred.summary.nearbyTapCount + 1,
       rhythmField,
       summary: inferred.summary,
+      scopeId: scopeForGesture?.id ?? null,
     });
+    // Register this loop inside its scope
+    if (scopeForGesture) {
+      scopeForGesture.loopIds.push(sourceLoop.id);
+    }
     const sceneVoiceWeight = SCENE_CONFIGS[sceneNameRef.current].voiceWeight;
     const responseLoop =
       callResponseEnabledRef.current &&
@@ -4162,7 +4458,23 @@ export function EchoSurface({
         return Math.max(strongest, intensity);
       }, 0);
 
+      // ---- Camera smooth interpolation ----
+      const cam = cameraRef.current;
+      cam.zoom = lerp(cam.zoom, cam.targetZoom, SCOPE_ZOOM_LERP_SPEED);
+      cam.viewCx = lerp(cam.viewCx, cam.targetViewCx, SCOPE_ZOOM_LERP_SPEED);
+      cam.viewCy = lerp(cam.viewCy, cam.targetViewCy, SCOPE_ZOOM_LERP_SPEED);
+      // ---- end camera smooth ----
+
       context.clearRect(0, 0, size.width, size.height);
+
+      // Apply camera transform for all world-space drawing.
+      // Transform: translate first so (viewCx,viewCy) maps to screen centre, then scale.
+      context.save();
+      context.translate(
+        size.width * (0.5 - cam.zoom * cam.viewCx),
+        size.height * (0.5 - cam.zoom * cam.viewCy),
+      );
+      context.scale(cam.zoom, cam.zoom);
 
       // Scene colour modifiers
       const activeSceneCfg = SCENE_CONFIGS[sceneNameRef.current];
@@ -4941,13 +5253,109 @@ export function EchoSurface({
         }
       }
 
+      // ================================================================
+      // Scope / musical-world rendering
+      // ================================================================
+      for (const scope of scopesRef.current) {
+        const cx = scope.cx * size.width;
+        const cy = scope.cy * size.height;
+        const rx = scope.rx * size.width;
+        const ry = scope.ry * size.height;
+        const age = now - scope.bornAt;
+        const bornProg = clamp(age / 720, 0, 1);
+        const isFocused = scope.id === cameraRef.current.focusScopeId;
+        const maxR = Math.max(rx, ry);
+
+        // 1. Soft elliptical fill: inner mist
+        const scopeFill = context.createRadialGradient(cx, cy, 0, cx, cy, maxR);
+        scopeFill.addColorStop(
+          0,
+          `hsla(${scope.hue}, 68%, 62%, ${bornProg * (isFocused ? 0.13 : 0.06)})`,
+        );
+        scopeFill.addColorStop(
+          0.55,
+          `hsla(${scope.hue}, 60%, 54%, ${bornProg * (isFocused ? 0.07 : 0.03)})`,
+        );
+        scopeFill.addColorStop(1, `hsla(${scope.hue}, 48%, 40%, 0)`);
+
+        context.save();
+        context.beginPath();
+        context.ellipse(cx, cy, rx * bornProg, ry * bornProg, 0, 0, TAU);
+        context.fillStyle = scopeFill;
+        context.fill();
+
+        // 2. Ellipse border: softly dashed, animated drift
+        context.beginPath();
+        context.ellipse(cx, cy, rx * bornProg, ry * bornProg, 0, 0, TAU);
+        context.strokeStyle = `hsla(${scope.hue}, 82%, 74%, ${
+          bornProg * (isFocused ? 0.72 : 0.34)
+        })`;
+        context.lineWidth = isFocused ? 1.6 / cam.zoom : 1.0 / cam.zoom;
+        context.setLineDash([5 / cam.zoom, 10 / cam.zoom]);
+        context.lineDashOffset = -(now * 0.011);
+        context.stroke();
+        context.setLineDash([]);
+
+        // 3. Clock emitter: concentric beat rings radiating from scope centre
+        const emitterBpm = scope.overrides.bpm ?? harmonic.bpm;
+        const beatMs = 60000 / emitterBpm;
+        const beatPhase = (now % beatMs) / beatMs;
+        const numRings = isFocused ? 4 : 3;
+        for (let ring = 0; ring < numRings; ring++) {
+          const ringPhase = modulo(beatPhase - ring / numRings, 1);
+          const ringRadius = maxR * (0.05 + ringPhase * 0.68);
+          const ringAlpha = easeOutCubic(1 - ringPhase) * bornProg * (isFocused ? 0.44 : 0.20);
+          if (ringAlpha < 0.02) continue;
+          context.beginPath();
+          context.arc(cx, cy, ringRadius, 0, TAU);
+          context.strokeStyle = `hsla(${scope.hue}, 90%, 82%, ${ringAlpha})`;
+          context.lineWidth = (1 + (1 - ringPhase) * 1.2) / cam.zoom;
+          context.stroke();
+        }
+
+        // 4. Label at scope centre (fades in, stays subtle)
+        if (bornProg > 0.5) {
+          const labelAlpha = bornProg * (isFocused ? 0.78 : 0.42) * easeInOutSine(bornProg);
+          const fontSize = Math.max(8, Math.min(15, maxR * 0.055));
+          context.font = `${fontSize / cam.zoom}px "Avenir Next Condensed","Franklin Gothic Medium","Arial Narrow",sans-serif`;
+          context.fillStyle = `hsla(${scope.hue}, 60%, 88%, ${labelAlpha})`;
+          context.textAlign = "center";
+          context.textBaseline = "middle";
+          context.letterSpacing = "0.18em";
+          context.fillText(scope.label.toUpperCase(), cx, cy);
+          context.letterSpacing = "";
+        }
+
+        // 5. Focus ring: bright pulse around the focused scope
+        if (isFocused) {
+          const pulseAmt = 0.5 + 0.5 * Math.sin(now * 0.0022);
+          context.beginPath();
+          context.ellipse(cx, cy, rx + 6 / cam.zoom, ry + 6 / cam.zoom, 0, 0, TAU);
+          context.strokeStyle = `hsla(${scope.hue}, 100%, 88%, ${0.24 + pulseAmt * 0.18})`;
+          context.lineWidth = 2 / cam.zoom;
+          context.stroke();
+        }
+
+        context.restore();
+      }
+      // ================================================================
+      // end scope rendering
+      // ================================================================
+
+      // Close camera transform
+      context.restore();
+
       animationFrameRef.current = window.requestAnimationFrame(frame);
     };
 
     animationFrameRef.current = window.requestAnimationFrame(frame);
 
+    // Wheel zoom – passive:false so we can preventDefault
+    surface.addEventListener("wheel", handleWheel, { passive: false });
+
     return () => {
       observer.disconnect();
+      surface.removeEventListener("wheel", handleWheel);
       if (animationFrameRef.current) {
         window.cancelAnimationFrame(animationFrameRef.current);
       }
@@ -4977,7 +5385,7 @@ export function EchoSurface({
     await ensureAudio();
 
     const now = performance.now();
-    const pointValue = makeSurfacePoint(event, surface, now);
+    const pointValue = makeSurfacePoint(event, surface, now, cameraRef.current);
     const previewRole =
       nextRoleOverrideRef.current === "auto" ? null : nextRoleOverrideRef.current;
     const hue = previewRole
@@ -4992,6 +5400,7 @@ export function EchoSurface({
       previewRole,
       points: [pointValue],
       travel: 0,
+      isPinch: false,
     });
     lastInteractionAtRef.current = now;
     syncActiveCount();
@@ -5017,7 +5426,72 @@ export function EchoSurface({
     }
 
     const now = performance.now();
-    const pointValue = makeSurfacePoint(event, surface, now);
+    const pointValue = makeSurfacePoint(event, surface, now, cameraRef.current);
+
+    // ---- Pinch / two-finger zoom detection ----
+    const allTouches = Array.from(simulationRef.current.activeTouches.values());
+    if (allTouches.length >= 2) {
+      const other = allTouches.find((t) => t.pointerId !== event.pointerId);
+      if (other && other.points.length > 0) {
+        const otherPos = other.points[other.points.length - 1];
+        const currentDist = distance(pointValue, otherPos);
+        const pinch = pinchRef.current;
+
+        if (!pinch) {
+          // Initialise pinch on first two-touch move
+          pinchRef.current = {
+            id0: event.pointerId,
+            id1: other.pointerId,
+            lastDist: currentDist,
+            lastMidX: (pointValue.x + otherPos.x) * 0.5,
+            lastMidY: (pointValue.y + otherPos.y) * 0.5,
+          };
+          // Mark both as pinch participants so finalizeTouch skips them
+          touch.isPinch = true;
+          other.isPinch = true;
+        } else {
+          const distDelta = currentDist - pinch.lastDist;
+          const cam = cameraRef.current;
+          const zoomFactor = 1 + distDelta * 3.2;
+          cam.targetZoom = clamp(cam.targetZoom * zoomFactor, 0.6, SCOPE_MAX_ZOOM);
+
+          // Pan toward pinch midpoint
+          const midX = (pointValue.x + otherPos.x) * 0.5;
+          const midY = (pointValue.y + otherPos.y) * 0.5;
+          const worldMid = screenToWorld(midX, midY, cam);
+          cam.targetViewCx = clamp(
+            cam.targetViewCx + (cam.viewCx - worldMid[0]) * 0.04,
+            0.1, 0.9,
+          );
+          cam.targetViewCy = clamp(
+            cam.targetViewCy + (cam.viewCy - worldMid[1]) * 0.04,
+            0.1, 0.9,
+          );
+
+          // When zoom returns near 1 while inside a scope, trigger exitScope
+          if (cam.targetZoom < 1.12 && cam.focusScopeId !== null) {
+            exitScope();
+          }
+          // When significantly zoomed in and a scope is nearby, enter it
+          if (distDelta < -0.018 && cam.focusScopeId === null) {
+            const worldCenter = screenToWorld(0.5, 0.5, cam);
+            const nearest = findScopeAt(worldCenter[0], worldCenter[1], scopesRef.current);
+            if (nearest) enterScope(nearest.id);
+          }
+
+          pinch.lastDist = currentDist;
+          pinch.lastMidX = midX;
+          pinch.lastMidY = midY;
+          return; // don't record points for gesture while pinching
+        }
+      }
+    } else if (pinchRef.current) {
+      pinchRef.current = null;
+    }
+
+    if (touch.isPinch) return;
+    // ---- end pinch ----
+
     const lastPoint = touch.points.at(-1);
     if (!lastPoint) {
       touch.points.push(pointValue);
@@ -5052,6 +5526,35 @@ export function EchoSurface({
 
     if (surfaceRef.current?.hasPointerCapture(event.pointerId)) {
       surfaceRef.current.releasePointerCapture(event.pointerId);
+    }
+  };
+
+  const handleWheel = (event: WheelEvent) => {
+    event.preventDefault();
+    const surface = surfaceRef.current;
+    if (!surface) return;
+
+    const cam = cameraRef.current;
+    const bounds = surface.getBoundingClientRect();
+    const screenNormX = (event.clientX - bounds.left) / bounds.width;
+    const screenNormY = (event.clientY - bounds.top) / bounds.height;
+
+    // Zoom around cursor position
+    const zoomDelta = event.deltaY < 0 ? 1.12 : 0.9;
+    const newZoom = clamp(cam.targetZoom * zoomDelta, 0.6, SCOPE_MAX_ZOOM);
+
+    // Keep cursor world-position stable: viewCx adjusts so cursor stays
+    const [worldX, worldY] = screenToWorld(screenNormX, screenNormY, cam);
+    cam.targetViewCx = clamp(worldX - (screenNormX - 0.5) / newZoom, 0.05, 0.95);
+    cam.targetViewCy = clamp(worldY - (screenNormY - 0.5) / newZoom, 0.05, 0.95);
+    cam.targetZoom = newZoom;
+
+    if (newZoom < 1.12 && cam.focusScopeId !== null) {
+      exitScope();
+    } else if (newZoom > 1.4 && cam.focusScopeId === null) {
+      const [wx, wy] = screenToWorld(0.5, 0.5, cam);
+      const nearest = findScopeAt(wx, wy, scopesRef.current);
+      if (nearest) enterScope(nearest.id);
     }
   };
 
@@ -5165,6 +5668,28 @@ export function EchoSurface({
           <div className={`surface-scene-label surface-scene-label--${currentScene}`} aria-live="polite">
             {currentScene}
           </div>
+
+          {focusScopeId !== null && (() => {
+            const focusedScope = scopes.find(s => s.id === focusScopeId);
+            return focusedScope ? (
+              <div
+                className="surface-scope-breadcrumb"
+                aria-live="polite"
+                onClick={stopSurfaceGesture}
+                onPointerDown={stopSurfaceGesture}
+                onPointerUp={stopSurfaceGesture}
+                onPointerMove={stopSurfaceGesture}
+              >
+                <span className="surface-scope-breadcrumb__back" onClick={exitScope}>↑</span>
+                <span
+                  className="surface-scope-breadcrumb__name"
+                  style={{ color: `hsl(${focusedScope.hue}, 70%, 72%)` }}
+                >
+                  {focusedScope.label}
+                </span>
+              </div>
+            ) : null;
+          })()}
 
           {!captureMode ? (
             <>

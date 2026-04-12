@@ -711,3 +711,54 @@ h2 {
   background: rgba(18, 14, 8, 0.44);
   letter-spacing: 0.32em;
 }
+
+/* ── Scope focus breadcrumb ─────────────────────────────────────── */
+.surface-scope-breadcrumb {
+  position: absolute;
+  top: 1.1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 0.48rem;
+  font-family: "Avenir Next Condensed", "Franklin Gothic Medium", "Arial Narrow", sans-serif;
+  font-size: 0.66rem;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: rgba(243, 233, 215, 0.46);
+  padding: 0.22rem 0.72rem;
+  border-radius: 100px;
+  border: 1px solid rgba(243, 228, 206, 0.09);
+  background: rgba(8, 19, 24, 0.36);
+  backdrop-filter: blur(8px);
+  pointer-events: auto;
+  animation: scope-crumb-appear 0.6s ease both;
+  z-index: 4;
+}
+
+.surface-scope-breadcrumb__back {
+  cursor: pointer;
+  opacity: 0.54;
+  font-size: 0.78rem;
+  line-height: 1;
+  transition: opacity 0.2s ease;
+}
+
+.surface-scope-breadcrumb__back:hover {
+  opacity: 0.88;
+}
+
+.surface-scope-breadcrumb__name {
+  transition: color 0.8s ease;
+}
+
+@keyframes scope-crumb-appear {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
