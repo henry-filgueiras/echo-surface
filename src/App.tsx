@@ -7,16 +7,16 @@ import { HowToPlay } from "./components/HowToPlay";
 
 const noteItems = [
   {
-    label: "Interaction Thesis",
-    text: "A gesture is not a command here. It is a phrase the surface can remember, recognize, and begin softly improvising back to you.",
+    label: "Primary Thesis",
+    text: "Gesture shape now carries melodic intent, while a shared harmonic state gives every phrase changing context as the bars move underneath it.",
   },
   {
-    label: "Invariant",
-    text: "Every touch leaves a ghost, repeated phrases can harden into rails, and idle time lets the surface dream in the player's own language.",
+    label: "Musical Logic",
+    text: "You draw contour rather than pitch directly: climbs rise, drops fall, flat spans sustain, and sharper turns become leaps inside the active key and chord.",
   },
   {
-    label: "Future Directions",
-    text: "Pressure, multi-hand polyphony, adaptive harmony, and spatial audio could push this toward a room instrument that gradually develops style.",
+    label: "Why It Matters",
+    text: "The same line can reharmonize beautifully over time, which makes the surface feel less like a one-shot sound toy and more like a tiny composition engine.",
   },
 ];
 
@@ -43,10 +43,9 @@ function App() {
           <p className="eyebrow">Museum Prototype / Playable Surface</p>
           <h1>Echo Surface</h1>
           <p className="director-note__lede">
-            A small instrument for tracing, tapping, and holding until the
-            screen starts to feel less like software and more like a living,
-            collaborative surface with memory, mood, and a gentle urge to
-            answer back.
+            A contour instrument for sketching melody with motion. Draw a shape,
+            let the bar clock cycle through harmony, and the surface retraces
+            your line as a phrase that keeps finding new meaning in each chord.
           </p>
         </div>
 

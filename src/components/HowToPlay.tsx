@@ -2,22 +2,22 @@ const withBase = (path: string) => `${import.meta.env.BASE_URL}${path}`;
 
 const guideSteps = [
   {
-    title: "1. Seed the surface",
+    title: "1. Draw a contour",
     image: withBase("guide/seed.png"),
-    alt: "Screenshot of Echo Surface showing mirrored ripple blooms after a light tap.",
-    text: "Tap anywhere to strike a mirrored bloom. The surface answers immediately, then stores that touch as a future echo.",
+    alt: "Screenshot of Echo Surface showing a single luminous contour phrase crossing the surface.",
+    text: "Move left to right and think in shape, not exact notes. Upward arcs will climb, downward arcs will fall, and flatter spans will hold.",
   },
   {
-    title: "2. Trace a phrase",
+    title: "2. Let harmony move",
     image: withBase("guide/trace.png"),
-    alt: "Screenshot of Echo Surface with looping traces crossing the surface like braided ribbons.",
-    text: "Drag slowly to write a path into memory. Repeated phrasing starts to condense into faint rails that later ghosts prefer to follow.",
+    alt: "Screenshot of Echo Surface with multiple contour phrases looping under a shared harmonic HUD.",
+    text: "A shared bar clock advances the chord progression automatically, so the same line can feel grounded, suspended, or urgent as context changes.",
   },
   {
-    title: "3. Hold to charge it",
+    title: "3. Watch it retrace",
     image: withBase("guide/hold.png"),
-    alt: "Screenshot of Echo Surface with a charged central hold and stronger symmetry rings.",
-    text: "A still hold thickens symmetry and resonance. Leave the surface alone afterward and it begins to dream back softened variations of what you taught it.",
+    alt: "Screenshot of Echo Surface with playback retracing a contour and bright note glyphs glowing along the line.",
+    text: "Playback travels back across your contour with luminous note glyphs, turning each saved trace into a small melodic loop rather than a raw touch echo.",
   },
 ];
 
@@ -28,9 +28,9 @@ export function HowToPlay() {
         <p className="eyebrow">Field Guide / Infographic</p>
         <h2>How to play the instrument</h2>
         <p className="guide-board__lede">
-          Three gestures are enough to teach the system. The surface remembers
-          what you do, learns a little from repetition, and answers in your own
-          visual language.
+          The surface now behaves like a composition toy: your hand draws a
+          melodic contour, the harmony keeps moving, and every stored line comes
+          back as a phrase with clearer musical intent.
         </p>
       </div>
 

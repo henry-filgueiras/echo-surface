@@ -6,7 +6,7 @@
 
 EchoSurface is a playful touch-first prototype exploring the idea of the screen as an instrument rather than a conventional interface.
 
-Touches, drags, and holds leave visible echoes that replay, interfere, and evolve over time, creating a living surface that can be “played” through motion and rhythm.
+The current prototype treats gesture shape as melodic intent while a shared harmonic state provides context. Draw a contour, let the bar clock advance the chord progression, and the surface retraces that line as a reharmonizing phrase.
 
 Part interaction experiment, part digital instrument, part sci-fi toy artifact.
 
@@ -21,10 +21,11 @@ Then open the local Vite URL in a browser and play with the surface using mouse 
 
 ## Interaction Model
 
-- Tap to seed mirrored ripples.
-- Drag to draw paths that come back later as semi-autonomous ghosts.
-- Hold to charge the surface and thicken the echo response.
-- The last 20 interactions remain in memory and reappear as playable traces.
+- Draw left to right to sketch a melodic contour.
+- Upward movement rises, downward movement falls, flatter spans sustain, and sharper vertical moves become leaps.
+- Notes are quantized to the active scale instead of mapped directly to raw frequencies.
+- Stable landing points bias toward active chord tones as the progression cycles.
+- Playback visibly retraces each contour with luminous note glyphs along the line.
 
 ## Bootstrap
 
