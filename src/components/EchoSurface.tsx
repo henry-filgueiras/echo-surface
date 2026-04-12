@@ -392,6 +392,100 @@ const PROGRESSION_OPTIONS: ProgressionOption[] = [
     progression: ["ii", "V", "I", "vi"],
   },
 ];
+// ---------------------------------------------------------------------------
+// Scene morphing: macro musical sections
+// ---------------------------------------------------------------------------
+
+type SceneName = "verse" | "chorus" | "bridge" | "drop";
+
+type SceneConfig = {
+  /** Chord-tone landing preference index (0=root, 1=3rd, 2=5th) */
+  harmonicLandingTone: number;
+  /** Probability that a response / dialogue voice is spawned (0–1) */
+  voiceWeight: number;
+  /** Hue rotation applied to the harmonic colour wash (degrees) */
+  hueShift: number;
+  /** Saturation delta applied to the harmonic colour wash (percentage points) */
+  saturationBoost: number;
+  /** Lightness delta applied to the harmonic colour wash (percentage points) */
+  brightnessBoost: number;
+  /** Multiplier for cadence-event intensity */
+  cadenceIntensity: number;
+  /**
+   * Rest-score threshold offset.  Positive = lower the bar for rests (more space).
+   * Negative = raise the bar (more notes, denser).
+   */
+  restBias: number;
+  /** Default number of bars before auto-advancing to the next scene */
+  defaultBars: number;
+};
+
+const SCENE_CONFIGS: Record<SceneName, SceneConfig> = {
+  verse: {
+    harmonicLandingTone: 0,   // root – settled, reflective
+    voiceWeight: 0.56,
+    hueShift: 0,
+    saturationBoost: 0,
+    brightnessBoost: 0,
+    cadenceIntensity: 0.82,
+    restBias: 0.08,            // slightly more spacious
+    defaultBars: 8,
+  },
+  chorus: {
+    harmonicLandingTone: 1,   // 3rd – lifted, open
+    voiceWeight: 0.88,
+    hueShift: 28,
+    saturationBoost: 18,
+    brightnessBoost: 10,
+    cadenceIntensity: 1.28,
+    restBias: -0.18,           // denser, fewer rests
+    defaultBars: 8,
+  },
+  bridge: {
+    harmonicLandingTone: 2,   // 5th – suspended tension
+    voiceWeight: 0.30,
+    hueShift: 148,
+    saturationBoost: -14,
+    brightnessBoost: -6,
+    cadenceIntensity: 0.58,
+    restBias: 0.26,            // sparse, much breathing room
+    defaultBars: 8,
+  },
+  drop: {
+    harmonicLandingTone: 0,   // root – powerful, grounded
+    voiceWeight: 1.0,
+    hueShift: 56,
+    saturationBoost: 28,
+    brightnessBoost: 18,
+    cadenceIntensity: 1.88,
+    restBias: -0.32,           // maximum density
+    defaultBars: 8,
+  },
+};
+
+/** Linear progression through sections; wraps continuously */
+const SCENE_SEQUENCE: SceneName[] = [
+  "verse",
+  "chorus",
+  "verse",
+  "bridge",
+  "chorus",
+  "drop",
+];
+
+/** Minimum bars before an early-energy trigger can fire */
+const SCENE_EARLY_TRIGGER_MIN_BARS = 2;
+/** surfaceEnergy threshold that can cause an early scene jump */
+const SCENE_EARLY_TRIGGER_ENERGY = 0.72;
+/** Minimum active roles required for an early scene jump */
+const SCENE_EARLY_TRIGGER_MIN_ROLES = 3;
+/** Recent gesture window for density check (in bars) */
+const SCENE_EARLY_TRIGGER_GESTURE_WINDOW_BARS = 2;
+/** Minimum recent gestures in that window for early trigger */
+const SCENE_EARLY_TRIGGER_MIN_GESTURES = 3;
+
+// ---------------------------------------------------------------------------
+
 const MODE_INTERVALS = {
   major: [0, 2, 4, 5, 7, 9, 11],
   minor: [0, 2, 3, 5, 7, 8, 10],
@@ -1929,6 +2023,10 @@ const buildPhraseNotes = (
   loop: ContourLoop,
   harmonicState: HarmonicState,
   chordSymbol: string,
+  /** From scene config: preferred chord-tone index (0=root, 1=3rd, 2=5th) */
+  sceneLandingTone = 0,
+  /** From scene config: positive = more rests, negative = denser */
+  sceneRestBias = 0,
 ) => {
   const scaleMidis = buildExtendedScaleMidis(harmonicState);
   const chordPitchClasses = getChordPitchClasses(harmonicState, chordSymbol);
@@ -1979,19 +2077,17 @@ const buildPhraseNotes = (
         anchor.emphasis > 0.62;
 
       if (wantsStability) {
-        const chordIndex =
+        // Blend loop's own landingBias with the scene's harmonic landing tone
+        const effectiveLandingTone =
           loop.dialogueKind === "response"
-            ? findNearestPreferredChordToneIndex(
-                scaleMidis,
-                scaleMidis[rawIndex],
-                chordPitchClasses,
-                loop.landingBias,
-              )
-            : findNearestChordToneIndex(
-                scaleMidis,
-                scaleMidis[rawIndex],
-                chordPitchClasses,
-              );
+            ? loop.landingBias
+            : sceneLandingTone;
+        const chordIndex = findNearestPreferredChordToneIndex(
+          scaleMidis,
+          scaleMidis[rawIndex],
+          chordPitchClasses,
+          effectiveLandingTone,
+        );
         scaleIndex =
           Math.abs(chordIndex - rawIndex) <= 2 || anchor.emphasis > 0.82
             ? chordIndex
@@ -2002,19 +2098,14 @@ const buildPhraseNotes = (
     }
 
     if (index === loop.anchors.length - 1) {
-      scaleIndex =
-        loop.dialogueKind === "response"
-          ? findNearestPreferredChordToneIndex(
-              scaleMidis,
-              scaleMidis[scaleIndex],
-              chordPitchClasses,
-              loop.landingBias,
-            )
-          : findNearestChordToneIndex(
-              scaleMidis,
-              scaleMidis[scaleIndex],
-              chordPitchClasses,
-            );
+      const effectiveFinalTone =
+        loop.dialogueKind === "response" ? loop.landingBias : sceneLandingTone;
+      scaleIndex = findNearestPreferredChordToneIndex(
+        scaleMidis,
+        scaleMidis[scaleIndex],
+        chordPitchClasses,
+        effectiveFinalTone,
+      );
     }
 
     const midi = scaleMidis[scaleIndex];
@@ -2126,12 +2217,15 @@ const buildPhraseNotes = (
       (loop.role === "pad" || loop.role === "bass" || loop.role === "echo" ? 0.16 : 0) +
       clamp((durationRatio - 0.86) / 1.4, 0, 1) * 0.12;
 
+    // sceneRestBias: positive = lower threshold (easier to become a rest / more space)
+    //               negative = raise threshold (denser, fewer rests)
+    const sceneAdjustedRestThreshold = 0.56 - sceneRestBias;
     if (
       loop.role !== "percussion" &&
       index < notes.length - 1 &&
       !currentAnchor.accent &&
       !currentAnchor.leap &&
-      restScore > 0.56
+      restScore > sceneAdjustedRestThreshold
     ) {
       notes[index].kind = "rest";
       notes[index].trigger = false;
@@ -2937,6 +3031,10 @@ export function EchoSurface({
   const fusionCooldownRef = useRef(new Map<string, number>());
   const nextRoleOverrideRef = useRef<VoiceRoleOverride>("auto");
   const callResponseEnabledRef = useRef(true);
+  // Scene morph state
+  const sceneSeqIndexRef = useRef(0);
+  const sceneNameRef = useRef<SceneName>("verse");
+  const sceneStartBarRef = useRef(1);
   const [harmonicState, setHarmonicState] = useState(DEFAULT_HARMONIC_STATE);
   const [memory, setMemory] = useState<MemoryChip[]>([]);
   const [activeCount, setActiveCount] = useState(0);
@@ -2945,6 +3043,7 @@ export function EchoSurface({
   const [nextRoleOverride, setNextRoleOverride] =
     useState<VoiceRoleOverride>("auto");
   const [callResponseEnabled, setCallResponseEnabled] = useState(true);
+  const [currentScene, setCurrentScene] = useState<SceneName>("verse");
 
   const currentChord = useMemo(
     () => getChordForBar(harmonicState.currentBar, harmonicState),
@@ -3703,8 +3802,11 @@ export function EchoSurface({
       rhythmField,
       summary: inferred.summary,
     });
+    const sceneVoiceWeight = SCENE_CONFIGS[sceneNameRef.current].voiceWeight;
     const responseLoop =
-      callResponseEnabledRef.current && role !== "percussion"
+      callResponseEnabledRef.current &&
+      role !== "percussion" &&
+      Math.random() < sceneVoiceWeight
         ? createResponseLoop(sourceLoop, loopIdRef.current + Math.round(now))
         : undefined;
 
@@ -3983,10 +4085,54 @@ export function EchoSurface({
         lastBarTriggerRef.current = barNumber;
         playChordPad(chordSymbol, barNumber);
         pushFlash(point(0.5, 0.5, now), "pad", chordHue, 0.74, "bar");
+
+        // ---- Scene morph: check for transition on each new bar ----
+        {
+          const sceneCfg = SCENE_CONFIGS[sceneNameRef.current];
+          const barsInScene = Math.max(barNumber - sceneStartBarRef.current, 0);
+
+          // Early trigger: high energy + dense gestures skip ahead to chorus/drop
+          const gestureWindowMs = getBarMs(harmonic) * SCENE_EARLY_TRIGGER_GESTURE_WINDOW_BARS;
+          const recentGestureCount = state.recentGestures.filter(
+            (g) => now - g.timestamp < gestureWindowMs,
+          ).length;
+          const earlyTriggerReady =
+            barsInScene >= SCENE_EARLY_TRIGGER_MIN_BARS &&
+            state.surfaceEnergy >= SCENE_EARLY_TRIGGER_ENERGY &&
+            recentGestureCount >= SCENE_EARLY_TRIGGER_MIN_GESTURES &&
+            activeRoles.size >= SCENE_EARLY_TRIGGER_MIN_ROLES;
+
+          const defaultTransition = barsInScene >= sceneCfg.defaultBars;
+          const earlyTransition =
+            earlyTriggerReady &&
+            !defaultTransition &&
+            (sceneNameRef.current === "verse" || sceneNameRef.current === "chorus");
+
+          if (defaultTransition || earlyTransition) {
+            let nextScene: SceneName;
+            if (earlyTransition && !defaultTransition) {
+              // Jump directly to chorus or drop depending on current scene
+              nextScene = sceneNameRef.current === "verse" ? "chorus" : "drop";
+              // Advance sequence index to match so default flow stays coherent
+              const jumpIndex = SCENE_SEQUENCE.lastIndexOf(nextScene);
+              sceneSeqIndexRef.current = jumpIndex >= 0 ? jumpIndex : sceneSeqIndexRef.current;
+            } else {
+              const nextSeqIndex = (sceneSeqIndexRef.current + 1) % SCENE_SEQUENCE.length;
+              sceneSeqIndexRef.current = nextSeqIndex;
+              nextScene = SCENE_SEQUENCE[nextSeqIndex];
+            }
+            sceneNameRef.current = nextScene;
+            sceneStartBarRef.current = barNumber;
+            setCurrentScene(nextScene);
+          }
+        }
+        // ---- end scene morph ----
+
         if (cadenceShouldTrigger) {
+          const sceneCadenceMult = SCENE_CONFIGS[sceneNameRef.current].cadenceIntensity;
           triggerCadenceEvent(
             barNumber,
-            clamp(0.74 + activeRoles.size * 0.12, 0.74, 1.28),
+            clamp((0.74 + activeRoles.size * 0.12) * sceneCadenceMult, 0.62, 2.0),
           );
         }
       }
@@ -4018,6 +4164,13 @@ export function EchoSurface({
 
       context.clearRect(0, 0, size.width, size.height);
 
+      // Scene colour modifiers
+      const activeSceneCfg = SCENE_CONFIGS[sceneNameRef.current];
+      const sceneHueShift = activeSceneCfg.hueShift;
+      const sceneSatBoost = activeSceneCfg.saturationBoost;
+      const sceneBriBoost = activeSceneCfg.brightnessBoost;
+      const sceneChordHue = modulo(chordHue + sceneHueShift, 360);
+
       const background = context.createLinearGradient(0, 0, size.width, size.height);
       background.addColorStop(0, "#041117");
       background.addColorStop(0.45, "#0b2426");
@@ -4047,15 +4200,19 @@ export function EchoSurface({
         size.height * 0.48,
         Math.max(size.width, size.height) * 0.7,
       );
+      const washSat = clamp(92 + sceneSatBoost, 0, 100);
+      const washLit = clamp(68 + sceneBriBoost, 0, 100);
       harmonicWash.addColorStop(
         0,
-        `hsla(${chordHue}, 92%, 68%, ${
+        `hsla(${sceneChordHue}, ${washSat}%, ${washLit}%, ${
           0.08 + state.surfaceEnergy * 0.08 + cadenceGlow * 0.04
         })`,
       );
       harmonicWash.addColorStop(
         0.58,
-        `rgba(109, 209, 200, ${0.03 + state.surfaceEnergy * 0.03 + cadenceGlow * 0.02})`,
+        `hsla(${sceneChordHue}, ${clamp(60 + sceneSatBoost * 0.5, 0, 100)}%, 72%, ${
+          0.03 + state.surfaceEnergy * 0.03 + cadenceGlow * 0.02
+        })`,
       );
       harmonicWash.addColorStop(1, "rgba(4, 17, 23, 0)");
       context.fillStyle = harmonicWash;
@@ -4079,11 +4236,11 @@ export function EchoSurface({
       flowField.addColorStop(0, "rgba(255,255,255,0)");
       flowField.addColorStop(
         0.48,
-        `hsla(${chordHue}, 80%, 72%, ${0.012 + state.surfaceEnergy * 0.01})`,
+        `hsla(${sceneChordHue}, ${clamp(80 + sceneSatBoost * 0.6, 0, 100)}%, 72%, ${0.012 + state.surfaceEnergy * 0.01})`,
       );
       flowField.addColorStop(
         1,
-        `hsla(${chordHue}, 88%, 78%, ${0.032 + state.surfaceEnergy * 0.014})`,
+        `hsla(${sceneChordHue}, ${clamp(88 + sceneSatBoost * 0.6, 0, 100)}%, ${clamp(78 + sceneBriBoost * 0.5, 0, 100)}%, ${0.032 + state.surfaceEnergy * 0.014})`,
       );
       context.fillStyle = flowField;
       context.fillRect(0, 0, size.width, size.height);
@@ -4396,10 +4553,17 @@ export function EchoSurface({
           getBarNumberAtTime(loop.scheduledAtMs, clockStartMsRef.current, harmonic) +
           cycleIndex * loop.loopBars;
         const cycleChord = getChordForBar(cycleStartBar, harmonic);
-        const phraseToken = `${cycleStartBar}:${cycleChord}:${harmonic.tonic}:${harmonic.mode}`;
+        const phraseToken = `${cycleStartBar}:${cycleChord}:${harmonic.tonic}:${harmonic.mode}:${sceneNameRef.current}`;
 
         if (loop.lastPhraseToken !== phraseToken) {
-          loop.phraseNotes = buildPhraseNotes(loop, harmonic, cycleChord);
+          const phraseCfg = SCENE_CONFIGS[sceneNameRef.current];
+          loop.phraseNotes = buildPhraseNotes(
+            loop,
+            harmonic,
+            cycleChord,
+            phraseCfg.harmonicLandingTone,
+            phraseCfg.restBias,
+          );
           loop.lastPhraseToken = phraseToken;
         }
 
@@ -4996,6 +5160,10 @@ export function EchoSurface({
               <span className="surface-hud__label">Bar</span>
               <span className="surface-hud__value">{harmonicState.currentBar}</span>
             </p>
+          </div>
+
+          <div className={`surface-scene-label surface-scene-label--${currentScene}`} aria-live="polite">
+            {currentScene}
           </div>
 
           {!captureMode ? (
