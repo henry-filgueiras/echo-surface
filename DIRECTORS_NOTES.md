@@ -179,6 +179,8 @@ At the moment, EchoSurface is roughly:
 - a soft-lane ensemble score with readable role geography
 - a phrase engine where silence and sustain are compositional material
 - a local rhythm-gravity field where nearby phrases can phase-lock softly
+- a dramaturgical form-engine with verse/chorus/bridge/drop scene arcs
+- a hierarchical composition space where scopes create local harmonic worlds
 
 It is not trying to be a DAW, piano roll, or synth workstation.
 
@@ -220,6 +222,24 @@ A minimal scene label appears bottom-centre with per-scene colour accents and a 
 
 Important conceptual point: this is not "song sections" in the DAW sense. It is dramaturgical. The surface is not following a chart; it is accumulating conviction over time and releasing it.
 
+### Phase 11: Scope Hierarchy — Hierarchical Composition Worlds
+
+The surface is no longer a single flat plane. It now supports softly bounded elliptical "scopes": regions that contain their own harmonic context, voice phrases, and sub-scopes.
+
+**Scope creation gesture.** Drawing a large, slow, closed loop (high circularity, loopiness, and travel, with the path ending near its origin, over at least 900ms) spawns a scope ellipse. The system assigns a randomly chosen ritual label (Liminal, Veil, Threshold, Hollow, Reverie, etc.) and a unique hue derived from its position.
+
+**Scope records.** Each scope stores: center (cx, cy), radii (rx, ry), hue, label, parent/child ids, loop ids, and optional harmonic overrides for tonic, mode, BPM, progression, or scene. Overrides are applied on top of the parent's context, not instead of it. Walking the tree root→leaf produces the effective harmonic world for any phrase.
+
+**Camera and semantic zoom.** The canvas applies a camera transform (translate + scale) each frame via smooth lerp. Two-finger pinch or scroll wheel zooms, with the cursor/pinch midpoint held stable in world space. Zooming in past a threshold while a scope is under view enters that scope. Zooming back out exits to the parent. This is not a node editor — it is more like falling into a world and surfacing again.
+
+**Clock emitters.** Each scope renders animated concentric rings that pulse on the beat, synchronized to BPM. They communicate rhythmic identity without adding UI controls.
+
+**Scope breadcrumb.** When inside a focused scope, a minimal breadcrumb appears top-center showing the scope name (tinted to its hue) and a tap-to-exit arrow. It disappears when at the root level.
+
+**Musical implication.** Phrases drawn inside a scope inherit its harmonic overrides. Two scopes on the same canvas can be in different keys, modes, or scenes. The canvas becomes a composition of worlds rather than a composition on a single plane.
+
+Important conceptual note: scopes are not containers in an app-UI sense. They are more like harmonic territories: fields of influence that give a region of the canvas its own musical character. The user is not managing a hierarchy — they are drawing an instrument and discovering that some regions sound different.
+
 ## Current Implementation Shape
 
 Most of the intelligence currently lives in:
@@ -246,6 +266,9 @@ Important systems already present in `EchoSurface.tsx`:
 - call-and-response generation
 - cadence ritual events
 - fusion voice spawning and rendering
+- scene morphing state machine (verse/chorus/bridge/drop) with early-trigger logic
+- scope hierarchy: ScopeRecord tree, CameraState, semantic zoom, scope gesture creation
+- clock emitter rendering and scope breadcrumb UI
 
 This is powerful, but also means the main surface file is becoming the entire instrument brain. If the project keeps growing, it may be worth extracting pure musical logic into separate modules without losing the fast, sketch-like iteration style that got us here.
 
