@@ -4460,6 +4460,13 @@ export function EchoSurface({
 
       // ---- Camera smooth interpolation ----
       const cam = cameraRef.current;
+      // Clamp target so we never zoom below 1 (no meaningful "outside world" to reveal).
+      // When exiting back to root, snap view center back to 0.5,0.5.
+      if (cam.targetZoom <= 1) {
+        cam.targetZoom = 1;
+        cam.targetViewCx = 0.5;
+        cam.targetViewCy = 0.5;
+      }
       cam.zoom = lerp(cam.zoom, cam.targetZoom, SCOPE_ZOOM_LERP_SPEED);
       cam.viewCx = lerp(cam.viewCx, cam.targetViewCx, SCOPE_ZOOM_LERP_SPEED);
       cam.viewCy = lerp(cam.viewCy, cam.targetViewCy, SCOPE_ZOOM_LERP_SPEED);
@@ -4467,16 +4474,11 @@ export function EchoSurface({
 
       context.clearRect(0, 0, size.width, size.height);
 
-      // Apply camera transform for all world-space drawing.
-      // Transform: translate first so (viewCx,viewCy) maps to screen centre, then scale.
-      context.save();
-      context.translate(
-        size.width * (0.5 - cam.zoom * cam.viewCx),
-        size.height * (0.5 - cam.zoom * cam.viewCy),
-      );
-      context.scale(cam.zoom, cam.zoom);
+      // ── Screen-space background pass ─────────────────────────────────────
+      // Drawn WITHOUT camera transform so fills always cover the full canvas
+      // regardless of zoom level.
 
-      // Scene colour modifiers
+      // Scene colour modifiers (used in both passes)
       const activeSceneCfg = SCENE_CONFIGS[sceneNameRef.current];
       const sceneHueShift = activeSceneCfg.hueShift;
       const sceneSatBoost = activeSceneCfg.saturationBoost;
@@ -4707,6 +4709,17 @@ export function EchoSurface({
         context.closePath();
         context.stroke();
       });
+
+      // ── World-space pass ──────────────────────────────────────────────────
+      // Camera transform applied here. All coordinates inside this block are
+      // in normalised 0-1 world space (multiplied by size.width / size.height).
+      context.save();
+      context.translate(
+        size.width * (0.5 - cam.zoom * cam.viewCx),
+        size.height * (0.5 - cam.zoom * cam.viewCy),
+      );
+      context.scale(cam.zoom, cam.zoom);
+
       const glyphBoost = 1 + cadenceGlow * 0.55;
 
       state.flashes = state.flashes.filter((flash) => now - flash.bornAt < flash.ttl);
@@ -5453,7 +5466,7 @@ export function EchoSurface({
           const distDelta = currentDist - pinch.lastDist;
           const cam = cameraRef.current;
           const zoomFactor = 1 + distDelta * 3.2;
-          cam.targetZoom = clamp(cam.targetZoom * zoomFactor, 0.6, SCOPE_MAX_ZOOM);
+          cam.targetZoom = clamp(cam.targetZoom * zoomFactor, 1, SCOPE_MAX_ZOOM);
 
           // Pan toward pinch midpoint
           const midX = (pointValue.x + otherPos.x) * 0.5;
@@ -5541,7 +5554,7 @@ export function EchoSurface({
 
     // Zoom around cursor position
     const zoomDelta = event.deltaY < 0 ? 1.12 : 0.9;
-    const newZoom = clamp(cam.targetZoom * zoomDelta, 0.6, SCOPE_MAX_ZOOM);
+    const newZoom = clamp(cam.targetZoom * zoomDelta, 1, SCOPE_MAX_ZOOM);
 
     // Keep cursor world-position stable: viewCx adjusts so cursor stays
     const [worldX, worldY] = screenToWorld(screenNormX, screenNormY, cam);

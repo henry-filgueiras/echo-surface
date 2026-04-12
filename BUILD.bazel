@@ -16,6 +16,7 @@ exports_files([
     "tsconfig.json",
     "tsconfig.node.json",
     "vite.config.ts",
+    "tools/test_zoom.js",
 ])
 
 filegroup(
@@ -58,4 +59,13 @@ sh_binary(
     name = "docker_down",
     srcs = ["tools/docker_down.sh"],
     data = [":project_sources"],
+)
+
+sh_binary(
+    name = "test_zoom",
+    srcs = ["tools/test_zoom.sh"],
+    data = [
+        ":project_sources",
+        "tools/test_zoom.js",
+    ],
 )
