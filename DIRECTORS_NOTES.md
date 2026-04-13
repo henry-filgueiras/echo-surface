@@ -1,6 +1,6 @@
 # EchoSurface Director's Notes
 
-As of April 12, 2026.
+As of April 13, 2026.
 
 This file is a compact handoff artifact for future sessions. The goal is to preserve intent, not just features.
 
@@ -242,6 +242,36 @@ Canonical polygon loops can now be bound together into **polyrhythmic ecosystems
 
 **Key concept.** The filament makes the polyrhythm legible — you can *see* 3:4 happening as three pulses chase four pulses across the same arc. The goal is to make the surface feel like a living organism where rhythmic relationships are visible relationships.
 
+### Phase 15: Radial Shape Palette — Touch-First Shape Summoning
+
+The frustration addressed here: freehand polygon inference (Phase 10 / 14.5) is powerful but unreliable under hurried or imprecise touch input. Closing a shape precisely enough to trigger detection requires deliberate effort that interrupts creative flow on iPad.
+
+The solution is an explicit, primary interaction that feels like *summoning* rather than *selecting*.
+
+**Interaction.** A long press (~480ms) on empty canvas opens a radial shape palette centered at the touch anchor. During the press, a dashed pulsing ring grows around the touch point, giving tactile-visual feedback that the palette is loading. On the timer firing, the musical gesture in progress is silently abandoned and the palette blooms. The user drags (or holds still) over a wedge, then lifts to stamp the canonical shape. Lifting without entering a wedge dismisses the palette cleanly.
+
+**Palette layout.** Four shapes arranged at cardinal positions around the anchor point:
+- North (up): Triangle (3) — percussion / triplet
+- East (right): Square (4) — percussion / four-on-the-floor
+- South (down): Pentagon (5) — lead / 5-beat odd meter
+- West (left): Hexagon (6) — pad / 6-step compound groove
+
+Each wedge is an annular sector (inner radius ~30px, outer radius ~90px) with a role-colored radial gradient fill, a canonical polygon glyph at the midpoint, and a subtle N-label near the outer rim. A glowing center eye pulses under the anchor point.
+
+**Visual feel.** The palette breathes at ~1.25 Hz (scale oscillation ± 4%). It arrives via an ease-out-cubic scale animation over ~280ms. The hovered wedge intensifies — brighter fill, thicker glyph stroke, soft shadow bloom. Non-hovered wedges stay dimly luminous, suggesting presence without demanding attention.
+
+**System integration.** Stamped shapes use `spawnPolygonLoop` with a pre-built `PolygonSpec` (10% of min dimension, vertex pointing up). They are identical in musical participation to freehand-drawn polygons: rhythmic loop roles, phase bindings, resonance filaments, motif memory, and scope harmonic reinterpretation all work exactly the same.
+
+**Preserving freehand.** The long-press detection is a timer-based hijack of the existing musical gesture. If the finger moves more than ~14px before the timer fires, the long-press is cancelled and the gesture proceeds as normal freehand input. So the freehand path (including polygon snap) remains fully intact as the "fast but imprecise" shortcut. The palette is the "slower but guaranteed" path.
+
+**GestureMode extension.** A new `"palette-open"` mode was added to the existing strict state machine alongside `idle`, `musical`, `camera`, `motif-drag`, and `filament-drag`. Long-press timer cancellation is fully handled in all exit paths: second-finger camera transition, musical end, musical cancel.
+
+**Key concept.** The gesture is not "opening a menu." It is "holding still until the field responds." The palette appearing below the anchor is less like a UI popup and more like energy pooling at the touch point until a pattern emerges. Releasing over a shape is releasing that held intention.
+
+A sixth feeling worth protecting:
+
+6. "The surface recognized what I meant, not just what I drew."
+
 ## What The Surface Is Now
 
 At the moment, EchoSurface is roughly:
@@ -261,6 +291,7 @@ At the moment, EchoSurface is roughly:
 - a satellite-sigil ecology where dormant memories can be reawakened or migrated
 - a geometric ritual field where drawn polygon shapes snap to canonical rhythmic cycles
 - a polyrhythmic ecosystem where polygon loops can be bound by resonance filaments that make rhythmic ratios visible and audible
+- a touch-first shape summoning system where long-press opens a radial palette that lets users stamp canonical rhythmic polygons without needing to draw them precisely
 
 It is not trying to be a DAW, piano roll, or synth workstation.
 

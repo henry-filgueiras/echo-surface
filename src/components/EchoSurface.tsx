@@ -226,7 +226,169 @@ type GestureMode =
       // Reference values for absolute zoom-ratio computation (no drift)
       initialZoom: number;
       initialDist: number; // screen-space hypotenuse at start
+    }
+  | {
+      // Radial shape palette summoned by long-press on empty canvas.
+      // Finger stays down; releasing over a wedge stamps the canonical shape.
+      kind: "palette-open";
+      pointerId: number;
+      anchorWorldX: number;  // world-space coords of the long-press point
+      anchorWorldY: number;
+      anchorScreenX: number; // CSS-pixel coords on the canvas element
+      anchorScreenY: number;
+      openedAt: number;      // performance.now() when palette became visible
+      hoveredSides: number | null; // which wedge the finger is currently over
     };
+
+// ---------------------------------------------------------------------------
+// Radial shape palette — module-level constants and drawing
+// ---------------------------------------------------------------------------
+const LONG_PRESS_MS = 480;
+const LONG_PRESS_MOVE_CANCEL_PX = 14;
+
+const PALETTE_INNER_R = 30;
+const PALETTE_OUTER_R = 90;
+const PALETTE_GLYPH_R = 13;
+const PALETTE_BREATH_HZ = 1.25;
+const PALETTE_INNER_DEAD_ZONE_PX = 32;
+
+// Wedge centers in radians (cardinal directions)
+const PALETTE_WEDGE_DEFS: ReadonlyArray<{ sides: number; angle: number }> = [
+  { sides: 3, angle: -Math.PI / 2 }, // triangle  — north
+  { sides: 4, angle: 0 },            // square    — east
+  { sides: 5, angle: Math.PI / 2 },  // pentagon  — south
+  { sides: 6, angle: Math.PI },      // hexagon   — west
+];
+
+// Role hues matching VOICE_ROLE_STYLES / POLYGON_SIDE_ROLE
+const PALETTE_SHAPE_HUE: Record<number, { hue: number; sat: number; lit: number }> = {
+  3: { hue: 0,   sat: 0,  lit: 92 }, // percussion — white/silver
+  4: { hue: 0,   sat: 0,  lit: 92 }, // percussion — white/silver
+  5: { hue: 44,  sat: 95, lit: 68 }, // lead       — amber
+  6: { hue: 248, sat: 88, lit: 70 }, // pad        — violet
+};
+
+/**
+ * Draw the radial shape palette in CSS-pixel screen space.
+ * Must be called OUTSIDE the camera-transform save/restore block.
+ */
+function drawShapePalette(
+  ctx: CanvasRenderingContext2D,
+  cx: number,         // screen-pixel centre (CSS px)
+  cy: number,
+  hoveredSides: number | null,
+  openedAt: number,
+  now: number,
+): void {
+  const age = Math.min(now - openedAt, 280);
+  const arrivalT = age / 280;
+  // ease-out-cubic arrival scale
+  const arrival = 1 - Math.pow(1 - arrivalT, 3);
+
+  const breath = 0.5 + 0.5 * Math.sin(now * (Math.PI * 2 * PALETTE_BREATH_HZ / 1000));
+  const breathScale = 1 + breath * 0.04;
+
+  ctx.save();
+  ctx.globalAlpha = arrival;
+  ctx.translate(cx, cy);
+  ctx.scale(breathScale, breathScale);
+
+  // ── Ambient outer halo ───────────────────────────────────────────────────
+  const haloGrad = ctx.createRadialGradient(0, 0, PALETTE_INNER_R, 0, 0, PALETTE_OUTER_R + 28);
+  haloGrad.addColorStop(0,   "hsla(210, 65%, 72%, 0.07)");
+  haloGrad.addColorStop(0.5, "hsla(210, 55%, 65%, 0.04)");
+  haloGrad.addColorStop(1,   "hsla(210, 55%, 65%, 0)");
+  ctx.beginPath();
+  ctx.arc(0, 0, PALETTE_OUTER_R + 28, 0, Math.PI * 2);
+  ctx.fillStyle = haloGrad;
+  ctx.fill();
+
+  // ── Wedges ───────────────────────────────────────────────────────────────
+  const GAP = 0.075; // radians gap between wedge edges
+  const wedgeSpan = Math.PI / 2 - GAP;
+
+  for (const wedge of PALETTE_WEDGE_DEFS) {
+    const isHov = wedge.sides === hoveredSides;
+    const hi = PALETTE_SHAPE_HUE[wedge.sides] ?? { hue: 200, sat: 70, lit: 70 };
+    const startA = wedge.angle - wedgeSpan / 2;
+    const endA   = wedge.angle + wedgeSpan / 2;
+    const litBoost = isHov ? 16 : 0;
+
+    // Annular sector (outer arc → inner arc reversed)
+    ctx.beginPath();
+    ctx.arc(0, 0, PALETTE_OUTER_R, startA, endA);
+    ctx.arc(0, 0, PALETTE_INNER_R, endA, startA, true);
+    ctx.closePath();
+
+    // Radial gradient fill — glows inward
+    const fillAlpha = isHov ? 0.76 : 0.36;
+    const grad = ctx.createRadialGradient(0, 0, PALETTE_INNER_R, 0, 0, PALETTE_OUTER_R);
+    grad.addColorStop(0, `hsla(${hi.hue}, ${hi.sat}%, ${hi.lit + litBoost}%, ${fillAlpha * 0.95})`);
+    grad.addColorStop(1, `hsla(${hi.hue}, ${hi.sat}%, ${hi.lit + litBoost}%, ${fillAlpha * 0.22})`);
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    // Border
+    ctx.strokeStyle = `hsla(${hi.hue}, ${hi.sat}%, ${hi.lit + 22}%, ${isHov ? 0.88 : 0.38})`;
+    ctx.lineWidth = isHov ? 1.6 : 0.9;
+    if (isHov) {
+      ctx.shadowColor  = `hsla(${hi.hue}, 90%, 82%, 0.7)`;
+      ctx.shadowBlur   = 14;
+    }
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // ── Glyph: canonical polygon at wedge midpoint ────────────────────────
+    const glyphMidR = (PALETTE_INNER_R + PALETTE_OUTER_R) * 0.50;
+    const gcx = Math.cos(wedge.angle) * glyphMidR;
+    const gcy = Math.sin(wedge.angle) * glyphMidR;
+    const pr  = PALETTE_GLYPH_R + (isHov ? 2.5 : 0);
+
+    ctx.beginPath();
+    for (let i = 0; i <= wedge.sides; i++) {
+      const a  = -Math.PI / 2 + (i / wedge.sides) * Math.PI * 2;
+      const px = gcx + Math.cos(a) * pr;
+      const py = gcy + Math.sin(a) * pr;
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.strokeStyle = `hsla(${hi.hue}, ${hi.sat}%, ${isHov ? 100 : 88}%, ${isHov ? 0.96 : 0.72})`;
+    ctx.lineWidth   = isHov ? 2.1 : 1.3;
+    if (isHov) {
+      ctx.shadowColor = `hsla(${hi.hue}, 90%, 92%, 0.9)`;
+      ctx.shadowBlur  = 10;
+    }
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // ── N label (subtle, near outer rim) ────────────────────────────────
+    const lblR = PALETTE_OUTER_R - 11;
+    const lx   = Math.cos(wedge.angle) * lblR;
+    const ly   = Math.sin(wedge.angle) * lblR;
+    ctx.fillStyle = `hsla(${hi.hue}, 40%, 90%, ${isHov ? 0.72 : 0.32})`;
+    ctx.font      = `${isHov ? 11 : 9}px 'Courier New', monospace`;
+    ctx.textAlign    = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(`${wedge.sides}`, lx, ly);
+  }
+
+  // ── Center eye ───────────────────────────────────────────────────────────
+  const eyeGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, PALETTE_INNER_R);
+  eyeGrad.addColorStop(0, `hsla(210, 65%, 82%, ${0.20 + breath * 0.13})`);
+  eyeGrad.addColorStop(1, "hsla(210, 60%, 65%, 0)");
+  ctx.beginPath();
+  ctx.arc(0, 0, PALETTE_INNER_R - 2, 0, Math.PI * 2);
+  ctx.fillStyle = eyeGrad;
+  ctx.fill();
+
+  // Tiny bright dot at exact anchor
+  ctx.beginPath();
+  ctx.arc(0, 0, 3.5, 0, Math.PI * 2);
+  ctx.fillStyle = `hsla(210, 70%, 92%, ${0.45 + breath * 0.28})`;
+  ctx.fill();
+
+  ctx.restore();
+}
 
 export function EchoSurface({
   preset,
@@ -288,6 +450,13 @@ export function EchoSurface({
   });
   const pinchRef = useRef<PinchTracker>(null); // kept for type compat, logic lives in gestureModeRef
   const gestureModeRef = useRef<GestureMode>({ kind: "idle" });
+  // Long-press → radial shape palette
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longPressAnchorRef = useRef<{
+    worldX: number; worldY: number;
+    screenX: number; screenY: number;
+    pointerId: number; startedAt: number;
+  } | null>(null);
   const [harmonicState, setHarmonicState] = useState(DEFAULT_HARMONIC_STATE);
   const [memory, setMemory] = useState<MemoryChip[]>([]);
   const [sessionMemory, setSessionMemory] = useState<SessionMemorySummary>({
@@ -329,8 +498,8 @@ export function EchoSurface({
           : "tap a dormant sigil to re-summon memory • drag it into another scope to reinterpret it"
         : nextRoleOverride === "auto"
         ? callResponseEnabled
-          ? "draw into the flow field, leave breathing gaps for silence, and let the surface answer one bar later"
-          : "draw into the flow field, leave breathing gaps for rests, and overlap phrases for fusion"
+          ? "draw into the field • or long-press to summon a shape • leave breathing gaps for silence • the surface will answer"
+          : "draw into the field • or long-press to summon a shape • leave breathing gaps for rests • overlap for fusion"
         : `next contour sealed as ${formatVoiceRoleLabel(nextRoleOverride)}`;
 
   const syncMemory = () => {
@@ -1289,6 +1458,26 @@ export function EchoSurface({
     );
 
     syncMemory();
+  };
+
+  /**
+   * Stamp a canonical N-gon centered at the given world-space anchor.
+   * Called when the user releases over a wedge in the radial shape palette.
+   * The resulting loop fully participates in the existing system:
+   * rhythmic loop roles, phase bindings, resonance filaments, motif memory,
+   * and scope harmonic reinterpretation.
+   */
+  const stampShapeFromPalette = (
+    sides: number,
+    anchorWorldX: number,
+    anchorWorldY: number,
+  ) => {
+    // Stamp radius: 10 % of the shorter canvas dimension (good default size)
+    const rFraction = 0.10;
+    // All shapes spawned vertex-up (pointing north)
+    const rotation = -Math.PI / 2;
+    const spec: PolygonSpec = { sides, cx: anchorWorldX, cy: anchorWorldY, rFraction, rotation };
+    spawnPolygonLoop([], spec);
   };
 
   const enterScope = (scopeId: ScopeId) => {
@@ -3294,6 +3483,47 @@ export function EchoSurface({
       // Close camera transform
       context.restore();
 
+      // ── Screen-space overlays (outside camera transform) ─────────────────
+      // These draw in CSS-pixel coordinates on top of the world canvas.
+
+      // Radial shape palette (palette-open state)
+      const paletteMode = gestureModeRef.current;
+      if (paletteMode.kind === "palette-open") {
+        drawShapePalette(
+          context,
+          paletteMode.anchorScreenX,
+          paletteMode.anchorScreenY,
+          paletteMode.hoveredSides,
+          paletteMode.openedAt,
+          now,
+        );
+      }
+
+      // Long-press progress ring (pending palette state)
+      const lpAnchor = longPressAnchorRef.current;
+      const lpMode   = gestureModeRef.current;
+      if (
+        lpAnchor !== null &&
+        longPressTimerRef.current !== null &&
+        lpMode.kind === "musical" &&
+        (lpMode as Extract<GestureMode, { kind: "musical" }>).pointerId === lpAnchor.pointerId
+      ) {
+        const elapsed  = now - lpAnchor.startedAt;
+        const progress = Math.min(elapsed / LONG_PRESS_MS, 1);
+        const ringR    = 16 + progress * 14;
+        const alpha    = 0.22 + progress * 0.44;
+        context.save();
+        context.beginPath();
+        context.arc(lpAnchor.screenX, lpAnchor.screenY, ringR, 0, Math.PI * 2);
+        context.strokeStyle = `hsla(210, 70%, 78%, ${alpha})`;
+        context.lineWidth   = 1.5;
+        context.setLineDash([5, 5]);
+        context.lineDashOffset = -(now * 0.014);
+        context.stroke();
+        context.setLineDash([]);
+        context.restore();
+      }
+
       animationFrameRef.current = window.requestAnimationFrame(frame);
     };
 
@@ -3530,6 +3760,51 @@ export function EchoSurface({
         durationMs: getBeatMs(previewHarmonic) * 0.34,
         voice: previewRole ?? "touch",
       });
+
+      // ── Long-press → radial shape palette ──────────────────────────────────
+      // After LONG_PRESS_MS of stillness the musical gesture is abandoned and
+      // the radial shape palette blooms at the anchor point instead.
+      const lpCam = cameraRef.current;
+      longPressAnchorRef.current = {
+        worldX:    (screenNormX - 0.5) / lpCam.zoom + lpCam.viewCx,
+        worldY:    (screenNormY - 0.5) / lpCam.zoom + lpCam.viewCy,
+        screenX,
+        screenY,
+        pointerId: event.pointerId,
+        startedAt: now,
+      };
+      const capturedLPId = event.pointerId;
+      longPressTimerRef.current = setTimeout(() => {
+        longPressTimerRef.current = null;
+        const currentMode = gestureModeRef.current;
+        if (currentMode.kind !== "musical" || currentMode.pointerId !== capturedLPId) {
+          longPressAnchorRef.current = null;
+          return;
+        }
+        const anchor = longPressAnchorRef.current;
+        if (!anchor || anchor.pointerId !== capturedLPId) return;
+
+        // Abandon the in-progress musical gesture (no voice emits)
+        simulationRef.current.activeTouches.delete(capturedLPId);
+        syncActiveCount();
+
+        // Open the palette
+        gestureModeRef.current = {
+          kind: "palette-open",
+          pointerId:     capturedLPId,
+          anchorWorldX:  anchor.worldX,
+          anchorWorldY:  anchor.worldY,
+          anchorScreenX: anchor.screenX,
+          anchorScreenY: anchor.screenY,
+          openedAt:      performance.now(),
+          hoveredSides:  null,
+        };
+        longPressAnchorRef.current = null;
+
+        // Soft crystalline summon tone
+        playMelodicTone({ midi: 72, hue: 210, accent: 0.22, durationMs: 340, voice: "echo" });
+      }, LONG_PRESS_MS);
+
       return;
     }
 
@@ -3548,6 +3823,11 @@ export function EchoSurface({
       }
 
       // Discard the musical gesture — do NOT call finalizeTouch (no voice should emit)
+      if (longPressTimerRef.current !== null) {
+        clearTimeout(longPressTimerRef.current);
+        longPressTimerRef.current = null;
+        longPressAnchorRef.current = null;
+      }
       simulationRef.current.activeTouches.delete(mode.pointerId);
       syncActiveCount();
       // Keep pointer capture on id0 so its move/up events still arrive
@@ -3567,6 +3847,31 @@ export function EchoSurface({
 
     const bounds = surface.getBoundingClientRect();
     const mode = gestureModeRef.current;
+
+    // ---- palette-open: track which wedge the finger is hovering ----
+    if (mode.kind === "palette-open" && mode.pointerId === event.pointerId) {
+      const dx = event.clientX - bounds.left - mode.anchorScreenX;
+      const dy = event.clientY - bounds.top  - mode.anchorScreenY;
+      const dist = Math.hypot(dx, dy);
+
+      let hoveredSides: number | null = null;
+      if (dist > PALETTE_INNER_DEAD_ZONE_PX) {
+        const angle = Math.atan2(dy, dx);
+        let best = PALETTE_WEDGE_DEFS[0];
+        let bestDiff = Infinity;
+        for (const w of PALETTE_WEDGE_DEFS) {
+          let diff = Math.abs(angle - w.angle);
+          if (diff > Math.PI) diff = Math.PI * 2 - diff;
+          if (diff < bestDiff) { bestDiff = diff; best = w; }
+        }
+        // Accept only if the angle falls within a wedge span (90° / 2 + small margin)
+        if (bestDiff <= Math.PI / 4 + 0.06) hoveredSides = best.sides;
+      }
+
+      gestureModeRef.current = { ...mode, hoveredSides };
+      lastInteractionAtRef.current = performance.now();
+      return;
+    }
 
     // ---- motif-drag ----
     if (mode.kind === "motif-drag" && mode.pointerId === event.pointerId) {
@@ -3627,6 +3932,20 @@ export function EchoSurface({
         touch.points.shift();
       }
       lastInteractionAtRef.current = now;
+
+      // ── Cancel long-press timer if the finger has moved far enough ────────
+      if (longPressTimerRef.current !== null) {
+        const lpAnchor = longPressAnchorRef.current;
+        if (lpAnchor && lpAnchor.pointerId === event.pointerId) {
+          const mdx = event.clientX - bounds.left - lpAnchor.screenX;
+          const mdy = event.clientY - bounds.top  - lpAnchor.screenY;
+          if (Math.hypot(mdx, mdy) > LONG_PRESS_MOVE_CANCEL_PX) {
+            clearTimeout(longPressTimerRef.current);
+            longPressTimerRef.current = null;
+            longPressAnchorRef.current = null;
+          }
+        }
+      }
 
       // ── Magnetic closure halo — auto-close when stroke nears the start ──────
       // Only activates once enough travel has accumulated to rule out short
@@ -3816,8 +4135,24 @@ export function EchoSurface({
       return;
     }
 
+    // ---- palette-open: releasing over a wedge stamps the shape ----
+    if (mode.kind === "palette-open" && mode.pointerId === event.pointerId) {
+      if (mode.hoveredSides !== null) {
+        stampShapeFromPalette(mode.hoveredSides, mode.anchorWorldX, mode.anchorWorldY);
+      }
+      gestureModeRef.current = { kind: "idle" };
+      releaseCapture(surface, event.pointerId);
+      return;
+    }
+
     // ---- musical gesture ends → finalize into voice ----
     if (mode.kind === "musical" && mode.pointerId === event.pointerId) {
+      // Cancel any pending long-press timer
+      if (longPressTimerRef.current !== null) {
+        clearTimeout(longPressTimerRef.current);
+        longPressTimerRef.current = null;
+        longPressAnchorRef.current = null;
+      }
       finalizeTouch(event.pointerId);
       gestureModeRef.current = { kind: "idle" };
       releaseCapture(surface, event.pointerId);
@@ -3859,7 +4194,19 @@ export function EchoSurface({
       return;
     }
 
+    if (mode.kind === "palette-open" && mode.pointerId === event.pointerId) {
+      gestureModeRef.current = { kind: "idle" };
+      releaseCapture(surface, event.pointerId);
+      return;
+    }
+
     if (mode.kind === "musical" && mode.pointerId === event.pointerId) {
+      // Cancel any pending long-press timer
+      if (longPressTimerRef.current !== null) {
+        clearTimeout(longPressTimerRef.current);
+        longPressTimerRef.current = null;
+        longPressAnchorRef.current = null;
+      }
       // On cancel, discard the gesture (don't create a voice from a cancelled touch)
       simulationRef.current.activeTouches.delete(event.pointerId);
       syncActiveCount();
