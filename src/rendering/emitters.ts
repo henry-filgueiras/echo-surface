@@ -3,10 +3,12 @@ import {
   VOICE_ROLE_STYLES,
   type MotifRhythmSkeleton,
   type MotifSigil,
+  type PolygonSpec,
   type SceneName,
+  type SurfaceSize,
   type VoiceRole,
 } from "../surface/model";
-import { easeInOutSine, easeOutCubic } from "../surface/contour";
+import { clamp, easeInOutSine, easeOutCubic, lerp } from "../surface/contour";
 import { noteNameToPitchClass } from "../music/engine";
 import { drawRoleGlyph, getRoleColor } from "./glyphs";
 
@@ -453,3 +455,162 @@ export const drawMotifSigil = ({
 // Zoom threshold below which sigil is fully visible, above which full scope shows
 export const SIGIL_ZOOM_FULL = 1.0;    // at this zoom and below → sigilWeight = 1
 export const SIGIL_ZOOM_FADE = 2.6;    // at this zoom and above → sigilWeight = 0
+
+// ---------------------------------------------------------------------------
+// Polygon loop sigil
+// ---------------------------------------------------------------------------
+
+/**
+ * Draw the canonical sigil for a snapped polygon loop.
+ *
+ * Layering (back → front):
+ *   active-edge retrace → full polygon outline → inner polygon → spokes
+ *   → vertex dots → center eye → N-label
+ *
+ * Called from within the world-space canvas transform block, so all coordinates
+ * are in normalised-world units (multiply by size.width / size.height to get
+ * canvas context pixels, as normalizedToPixels() does).
+ *
+ * @param cycleProgress  -1 = pre-schedule (dormant); 0-1 = active cycle progress
+ * @param activeStepIndex  current anchor step (vertex index)
+ * @param zoom  cam.zoom — used to keep line widths visually stable
+ */
+export const drawPolygonLoopSigil = (
+  ctx: CanvasRenderingContext2D,
+  spec: PolygonSpec,
+  size: SurfaceSize,
+  hue: number,
+  energy: number,
+  zoom: number,
+  cycleProgress: number,
+  activeStepIndex: number,
+  cadenceGlow: number,
+  now: number,
+): void => {
+  const { sides, cx: normCx, cy: normCy, rFraction, rotation } = spec;
+  const pxCx = normCx * size.width;
+  const pxCy = normCy * size.height;
+  const pxR = rFraction * Math.min(size.width, size.height);
+
+  const isActive = cycleProgress >= 0;
+  const baseAlpha = isActive
+    ? clamp(0.60 + energy * 0.28 + cadenceGlow * 0.16, 0.58, 1.0)
+    : 0.28;
+
+  // Very slow drift for dormant state — makes it feel alive but settled
+  const rot = isActive
+    ? rotation
+    : rotation + now * 0.000022 * (0.5 + sides * 0.12);
+
+  ctx.save();
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.setLineDash([]);
+
+  // ── Active edge retrace ────────────────────────────────────────────────────
+  if (isActive) {
+    ctx.shadowBlur = (16 + energy * 22 + cadenceGlow * 14) / zoom;
+    ctx.shadowColor = `hsla(${hue}, 88%, 78%, 0.52)`;
+
+    const completedEdges = Math.floor(cycleProgress * sides);
+    const partialProgress = cycleProgress * sides - completedEdges;
+
+    // Completed edges — bright, slightly thick
+    for (let i = 0; i < completedEdges; i++) {
+      const a1 = rot + (i / sides) * TAU;
+      const a2 = rot + ((i + 1) / sides) * TAU;
+      ctx.beginPath();
+      ctx.moveTo(pxCx + Math.cos(a1) * pxR, pxCy + Math.sin(a1) * pxR);
+      ctx.lineTo(pxCx + Math.cos(a2) * pxR, pxCy + Math.sin(a2) * pxR);
+      ctx.strokeStyle = `hsla(${hue}, 84%, 82%, ${baseAlpha * 0.76})`;
+      ctx.lineWidth = 2.8 / zoom;
+      ctx.stroke();
+    }
+
+    // Partial (current) edge — brightest
+    if (completedEdges < sides) {
+      const a1 = rot + (completedEdges / sides) * TAU;
+      const a2 = rot + ((completedEdges + 1) / sides) * TAU;
+      const vx1 = pxCx + Math.cos(a1) * pxR;
+      const vy1 = pxCy + Math.sin(a1) * pxR;
+      const vx2 = pxCx + Math.cos(a2) * pxR;
+      const vy2 = pxCy + Math.sin(a2) * pxR;
+      ctx.beginPath();
+      ctx.moveTo(vx1, vy1);
+      ctx.lineTo(lerp(vx1, vx2, partialProgress), lerp(vy1, vy2, partialProgress));
+      ctx.strokeStyle = `hsla(${hue}, 96%, 94%, ${clamp(baseAlpha * 1.08, 0, 1)})`;
+      ctx.lineWidth = 3.6 / zoom;
+      ctx.stroke();
+    }
+
+    ctx.shadowBlur = 0;
+  }
+
+  // ── Full polygon outline ────────────────────────────────────────────────────
+  ctx.shadowBlur = 0;
+  drawRegularPolygon(ctx, pxCx, pxCy, pxR, sides, rot);
+  ctx.strokeStyle = `hsla(${hue}, ${isActive ? 82 : 68}%, ${isActive ? 70 : 52}%, ${
+    isActive ? baseAlpha * 0.52 : 0.28
+  })`;
+  ctx.lineWidth = (isActive ? 1.7 : 1.2) / zoom;
+  ctx.stroke();
+
+  // ── Inner polygon (rotated by π/sides for star-sigil feel) ─────────────────
+  const innerR = pxR * 0.62;
+  drawRegularPolygon(ctx, pxCx, pxCy, innerR, sides, rot + Math.PI / sides);
+  ctx.strokeStyle = `hsla(${hue}, 70%, 58%, ${isActive ? baseAlpha * 0.36 : 0.12})`;
+  ctx.lineWidth = (isActive ? 0.9 : 0.6) / zoom;
+  ctx.stroke();
+
+  // ── Spokes (center → vertices) ─────────────────────────────────────────────
+  for (let i = 0; i < sides; i++) {
+    const angle = rot + (i / sides) * TAU;
+    ctx.beginPath();
+    ctx.moveTo(pxCx, pxCy);
+    ctx.lineTo(pxCx + Math.cos(angle) * pxR, pxCy + Math.sin(angle) * pxR);
+    ctx.strokeStyle = `hsla(${hue}, 62%, 56%, ${isActive ? 0.22 : 0.09})`;
+    ctx.lineWidth = 0.55 / zoom;
+    ctx.stroke();
+  }
+
+  // ── Vertex dots ────────────────────────────────────────────────────────────
+  for (let i = 0; i < sides; i++) {
+    const angle = rot + (i / sides) * TAU;
+    const vx = pxCx + Math.cos(angle) * pxR;
+    const vy = pxCy + Math.sin(angle) * pxR;
+    const isActiveVert = isActive && i === activeStepIndex % sides;
+    const vRadius = (isActiveVert ? 5.8 : 3.6) / zoom;
+    const vAlpha = isActiveVert ? baseAlpha : isActive ? baseAlpha * 0.44 : 0.18;
+
+    if (isActiveVert) {
+      ctx.shadowBlur = 12 / zoom;
+      ctx.shadowColor = `hsla(${hue}, 94%, 88%, 0.7)`;
+    }
+    ctx.beginPath();
+    ctx.arc(vx, vy, vRadius, 0, TAU);
+    ctx.fillStyle = `hsla(${hue}, 90%, 84%, ${vAlpha})`;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+
+  // ── Center eye ─────────────────────────────────────────────────────────────
+  const eyeR = (isActive ? 4.4 + energy * 2.6 + cadenceGlow * 2 : 2.8) / zoom;
+  const eyeAlpha = isActive ? clamp(0.52 + cadenceGlow * 0.32, 0.5, 0.95) : 0.17;
+  ctx.beginPath();
+  ctx.arc(pxCx, pxCy, eyeR, 0, TAU);
+  ctx.fillStyle = `hsla(${hue}, 90%, 88%, ${eyeAlpha})`;
+  ctx.fill();
+  ctx.strokeStyle = `hsla(${hue}, 76%, 70%, ${eyeAlpha * 0.62})`;
+  ctx.lineWidth = 0.7 / zoom;
+  ctx.stroke();
+
+  // ── N-label (subtle annotation below sigil) ────────────────────────────────
+  const fontSize = Math.max(7, 10) / zoom;
+  ctx.font = `${fontSize}px "Avenir Next Condensed","Franklin Gothic Medium","Arial Narrow",sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = `hsla(${hue}, 80%, 82%, ${isActive ? 0.46 : 0.18})`;
+  ctx.fillText(String(sides), pxCx, pxCy + pxR + 15 / zoom);
+
+  ctx.restore();
+};

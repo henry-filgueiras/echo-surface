@@ -1,11 +1,22 @@
 import type { PointerEvent as ReactPointerEvent } from "react";
 
 import {
+  POLYGON_ANGLE_REGULARITY_TOLERANCE,
+  POLYGON_CLOSURE_THRESHOLD,
+  POLYGON_CLUSTER_DISTANCE_FRAC,
+  POLYGON_CURVATURE_WINDOW,
+  POLYGON_MIN_CORNER_ANGLE_RAD,
+  POLYGON_MIN_RADIUS_PX,
+  POLYGON_MIN_TRAVEL,
+  POLYGON_RADIUS_REGULARITY_TOLERANCE,
+  POLYGON_RESAMPLE_COUNT,
   RESPONSE_ROLE_MAP,
   TAU,
   type CameraState,
+  type ContourAnchor,
   type GestureSummary,
   type NormalizedPoint,
+  type PolygonSpec,
   type RecentGesture,
   type VoiceRole,
   VOICE_ROLE_LANES,
@@ -445,4 +456,260 @@ export const makeSurfacePoint = (
 
   const [worldX, worldY] = screenToWorld(screenNormX, screenNormY, camera);
   return point(worldX, worldY, time);
+};
+
+// ---------------------------------------------------------------------------
+// Polygon gesture detection helpers
+// ---------------------------------------------------------------------------
+
+/** Resample path to uniform spatial distance in pixel space. */
+const spatialResamplePoints = (
+  pts: NormalizedPoint[],
+  count: number,
+  w: number,
+  h: number,
+): NormalizedPoint[] => {
+  if (pts.length < 2) return pts;
+  const totalDist = pts
+    .slice(1)
+    .reduce(
+      (s, p, i) =>
+        s + Math.hypot((p.x - pts[i].x) * w, (p.y - pts[i].y) * h),
+      0,
+    );
+  if (totalDist < 1) return pts;
+  const step = totalDist / (count - 1);
+  const result: NormalizedPoint[] = [pts[0]];
+  let acc = 0;
+  let pi = 0;
+
+  for (let i = 1; i < count - 1; i++) {
+    const target = i * step;
+    while (pi < pts.length - 2) {
+      const segLen = Math.hypot(
+        (pts[pi + 1].x - pts[pi].x) * w,
+        (pts[pi + 1].y - pts[pi].y) * h,
+      );
+      if (acc + segLen >= target) break;
+      acc += segLen;
+      pi++;
+    }
+    const segLen = Math.hypot(
+      (pts[pi + 1].x - pts[pi].x) * w,
+      (pts[pi + 1].y - pts[pi].y) * h,
+    );
+    const t = Math.min((target - acc) / Math.max(segLen, 0.001), 1);
+    result.push(
+      point(
+        lerp(pts[pi].x, pts[pi + 1].x, t),
+        lerp(pts[pi].y, pts[pi + 1].y, t),
+        lerp(pts[pi].t, pts[pi + 1].t, t),
+      ),
+    );
+  }
+  result.push(pts[pts.length - 1]);
+  return result;
+};
+
+/**
+ * Attempt to detect a regular polygon in a closed freehand path.
+ *
+ * Returns a PolygonSpec if the gesture looks like a 3-6 sided regular polygon,
+ * or null if it does not qualify.
+ *
+ * The algorithm:
+ *   1. Verify closure (first ↔ last in pixel space)
+ *   2. Resample to uniform spatial spacing
+ *   3. Measure turning-angle at each sample (curvature)
+ *   4. Find local curvature peaks → corner candidates
+ *   5. Cluster nearby peaks → N vertices
+ *   6. Reject if N ∉ {3, 4, 5, 6}
+ *   7. Check radius and angular regularity
+ *   8. Return canonical PolygonSpec
+ */
+export const detectPolygon = (
+  rawPoints: NormalizedPoint[],
+  surfaceWidth: number,
+  surfaceHeight: number,
+): PolygonSpec | null => {
+  if (rawPoints.length < 6) return null;
+
+  const W = surfaceWidth;
+  const H = surfaceHeight;
+  const minDim = Math.min(W, H);
+
+  // 1. Check closure
+  const first = rawPoints[0];
+  const last = rawPoints[rawPoints.length - 1];
+  const closurePx = Math.hypot((first.x - last.x) * W, (first.y - last.y) * H);
+  if (closurePx > POLYGON_CLOSURE_THRESHOLD * minDim) return null;
+
+  // Travel check
+  const travelPx = rawPoints
+    .slice(1)
+    .reduce(
+      (s, p, i) =>
+        s + Math.hypot((p.x - rawPoints[i].x) * W, (p.y - rawPoints[i].y) * H),
+      0,
+    );
+  if (travelPx < POLYGON_MIN_TRAVEL * minDim) return null;
+
+  // 2. Spatially uniform resample (pixel space)
+  const M = POLYGON_RESAMPLE_COUNT;
+  const pts = spatialResamplePoints(rawPoints, M, W, H);
+
+  // 3. Turning angle at each sample
+  const WIN = POLYGON_CURVATURE_WINDOW;
+  const curvatures: number[] = new Array(M).fill(0);
+
+  for (let i = WIN; i < M - WIN; i++) {
+    const prev = pts[i - WIN];
+    const curr = pts[i];
+    const next = pts[i + WIN];
+    const d1x = (curr.x - prev.x) * W;
+    const d1y = (curr.y - prev.y) * H;
+    const d2x = (next.x - curr.x) * W;
+    const d2y = (next.y - curr.y) * H;
+    const len1 = Math.hypot(d1x, d1y) || 0.001;
+    const len2 = Math.hypot(d2x, d2y) || 0.001;
+    const cosAngle = clamp(
+      (d1x / len1) * (d2x / len2) + (d1y / len1) * (d2y / len2),
+      -1,
+      1,
+    );
+    curvatures[i] = Math.acos(cosAngle);
+  }
+
+  // 4. Local maxima above threshold
+  const peaks: number[] = [];
+  for (let i = 1; i < M - 1; i++) {
+    if (
+      curvatures[i] >= POLYGON_MIN_CORNER_ANGLE_RAD &&
+      curvatures[i] > curvatures[i - 1] &&
+      curvatures[i] > curvatures[i + 1]
+    ) {
+      peaks.push(i);
+    }
+  }
+  if (peaks.length < 3) return null;
+
+  // 5. Cluster nearby peaks
+  const clusterDist = Math.max(2, Math.round(M * POLYGON_CLUSTER_DISTANCE_FRAC));
+  const clusters: number[][] = [];
+  for (const peak of peaks) {
+    const existing = clusters.find(
+      (c) => peak - (c[c.length - 1] ?? 0) < clusterDist,
+    );
+    if (existing) {
+      existing.push(peak);
+    } else {
+      clusters.push([peak]);
+    }
+  }
+
+  const N = clusters.length;
+  if (N < 3 || N > 6) return null;
+
+  // 6. Representative vertex = sample with highest curvature in each cluster
+  const vertices = clusters.map((cluster) => {
+    const best = cluster.reduce((a, b) =>
+      curvatures[a] > curvatures[b] ? a : b,
+    );
+    return pts[best];
+  });
+
+  // 7. Centroid and radii in pixel space
+  const pxVerts = vertices.map((v) => ({ x: v.x * W, y: v.y * H }));
+  const pxCx = pxVerts.reduce((s, v) => s + v.x, 0) / N;
+  const pxCy = pxVerts.reduce((s, v) => s + v.y, 0) / N;
+  const pxRadii = pxVerts.map((v) => Math.hypot(v.x - pxCx, v.y - pxCy));
+  const avgPxR = pxRadii.reduce((s, r) => s + r, 0) / N;
+
+  if (avgPxR < POLYGON_MIN_RADIUS_PX) return null;
+
+  // Radius regularity
+  const radiusStd = Math.sqrt(
+    pxRadii.reduce((s, r) => s + (r - avgPxR) ** 2, 0) / N,
+  );
+  if (radiusStd / avgPxR > POLYGON_RADIUS_REGULARITY_TOLERANCE) return null;
+
+  // Angular regularity
+  const angles = pxVerts
+    .map((v) => Math.atan2(v.y - pxCy, v.x - pxCx))
+    .sort((a, b) => a - b);
+  const expectedSpacing = TAU / N;
+  let maxAngleError = 0;
+  for (let i = 0; i < N; i++) {
+    const nextAngle = i < N - 1 ? angles[i + 1] : angles[0] + TAU;
+    const spacing = nextAngle - angles[i];
+    maxAngleError = Math.max(
+      maxAngleError,
+      Math.abs(spacing - expectedSpacing),
+    );
+  }
+  if (maxAngleError > expectedSpacing * POLYGON_ANGLE_REGULARITY_TOLERANCE) {
+    return null;
+  }
+
+  return {
+    sides: N,
+    cx: pxCx / W,
+    cy: pxCy / H,
+    rFraction: avgPxR / minDim,
+    rotation: angles[0],
+  };
+};
+
+/**
+ * Build the regularized N-gon path in normalized world coordinates.
+ * The path closes (first point = last point, modulo floating point).
+ * Timestamps span 0–1000 ms for anchor timing compatibility.
+ */
+export const buildPolygonPath = (
+  spec: PolygonSpec,
+  surfaceWidth: number,
+  surfaceHeight: number,
+): NormalizedPoint[] => {
+  const { sides, cx, cy, rFraction, rotation } = spec;
+  const pxR = rFraction * Math.min(surfaceWidth, surfaceHeight);
+  const result: NormalizedPoint[] = [];
+  for (let i = 0; i <= sides; i++) {
+    const angle = rotation + (i / sides) * TAU;
+    result.push(
+      point(
+        cx + (Math.cos(angle) * pxR) / surfaceWidth,
+        cy + (Math.sin(angle) * pxR) / surfaceHeight,
+        (i / sides) * 1000,
+      ),
+    );
+  }
+  return result;
+};
+
+/**
+ * Build N evenly-timed ContourAnchors at vertex positions for a polygon loop.
+ * All vertices have accent=true and emphasis=1.0 — every vertex is an onset.
+ */
+export const buildPolygonAnchors = (
+  spec: PolygonSpec,
+  surfaceWidth: number,
+  surfaceHeight: number,
+): ContourAnchor[] => {
+  const { sides, cx, cy, rFraction, rotation } = spec;
+  const pxR = rFraction * Math.min(surfaceWidth, surfaceHeight);
+  return Array.from({ length: sides }, (_, i) => {
+    const angle = rotation + (i / sides) * TAU;
+    const vx = cx + (Math.cos(angle) * pxR) / surfaceWidth;
+    const vy = cy + (Math.sin(angle) * pxR) / surfaceHeight;
+    return {
+      stepIndex: i,
+      drawRatio: i / sides,
+      point: point(vx, vy, (i / sides) * 1000),
+      movement: i === 0 ? 0 : 1,
+      sustain: false,
+      leap: false,
+      accent: true,
+      emphasis: 1.0,
+    } satisfies ContourAnchor;
+  });
 };

@@ -156,6 +156,8 @@ export type ContourLoop = {
   harmonicLandingBias?: number;
   /** ID of the scope this loop was created inside, null = root */
   scopeId: ScopeId | null;
+  /** Set when the loop was snapped from a drawn polygon gesture */
+  polygonSpec?: PolygonSpec;
 };
 
 export type PlaybackFlash = {
@@ -640,6 +642,55 @@ export const SCOPE_MIN_RADIUS = 0.07;
 export const SCOPE_MAX_ZOOM = 8;
 export const SCOPE_ZOOM_ENTER_MARGIN = 0.22; // extra space around scope when entering
 export const SCOPE_ZOOM_LERP_SPEED = 0.072;
+
+// ---------------------------------------------------------------------------
+// Polygon snap — closed n-gon gesture detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Spec for a snapped regular polygon.
+ * Stored on ContourLoop when the loop was created from a polygon gesture.
+ * All spatial values use consistent units:
+ *   cx / cy  — normalized 0-1 world coordinates
+ *   rFraction — radius as fraction of Math.min(surfaceWidth, surfaceHeight)
+ *   rotation  — angle of the "first" vertex from the centroid (radians)
+ */
+export type PolygonSpec = {
+  sides: number;       // 3 | 4 | 5 | 6
+  cx: number;
+  cy: number;
+  rFraction: number;
+  rotation: number;
+};
+
+// Closure: first↔last pixel distance as fraction of min(w,h)
+export const POLYGON_CLOSURE_THRESHOLD = 0.22;
+// Minimum travel as fraction of min(w,h) — large enough to be intentional
+export const POLYGON_MIN_TRAVEL = 0.26;
+// Faster threshold than scopes — polygon can be drawn more quickly
+export const POLYGON_MIN_DURATION_MS = 350;
+// Points to resample path to for corner detection
+export const POLYGON_RESAMPLE_COUNT = 52;
+// Window half-width for curvature estimation (samples)
+export const POLYGON_CURVATURE_WINDOW = 3;
+// Minimum turning angle at a vertex (radians ≈ 35.5°, catches hexagon at 60°)
+export const POLYGON_MIN_CORNER_ANGLE_RAD = 0.62;
+// Two peaks this close (fraction of resample count) are merged into one corner
+export const POLYGON_CLUSTER_DISTANCE_FRAC = 0.08;
+// Max angular spacing error (as fraction of expected 2π/N) for regularity
+export const POLYGON_ANGLE_REGULARITY_TOLERANCE = 0.46;
+// Max radius std/mean for regularity
+export const POLYGON_RADIUS_REGULARITY_TOLERANCE = 0.44;
+// Minimum polygon radius in pixels — prevents tiny accidental shapes
+export const POLYGON_MIN_RADIUS_PX = 38;
+
+/** Maps polygon side count to a voice role */
+export const POLYGON_SIDE_ROLE: Record<number, VoiceRole> = {
+  3: "percussion",   // triplet / 3-beat
+  4: "percussion",   // four-on-the-floor
+  5: "lead",         // 5-beat odd meter
+  6: "pad",          // 6-step compound groove
+};
 
 export const SCOPE_LABEL_POOL = [
   "grove", "ring", "hollow", "veil",

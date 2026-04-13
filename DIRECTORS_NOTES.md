@@ -143,6 +143,47 @@ Preferred interpretation became:
 
 Playback now shows rests as dim ghost placeholders or fading empty glyph spaces. This was important. If silence is musically real, it should also be visually real. The user should feel that the surface is choosing to breathe, not failing to fire.
 
+### Phase 10 (addendum): Polygon Snap — Geometric Shape Attraction
+
+Closed contour phrases drawn as approximately regular polygons (triangle, square, pentagon, hexagon) now snap to canonical n-gon shapes and are interpreted as rhythmic cycles.
+
+**Detection.** When `finalizeTouch` processes a closed gesture, it runs a new polygon detector *before* the scope/voice routing path. The detector:
+1. Verifies closure (first ↔ last pixel distance ≤ 22% of min(w,h))
+2. Resamples to 52 spatially-uniform points in pixel space (aspect-ratio aware)
+3. Computes turning angle at each sample using a 3-sample window
+4. Finds local curvature peaks → corner candidates
+5. Clusters peaks within 8% of path count → N vertices
+6. Accepts if N ∈ {3, 4, 5, 6} and both radius regularity (std/mean < 44%) and angular regularity (max spacing error < 46% of expected 2π/N) pass
+
+This intentionally rejects smooth circles (no sharp peaks) so scope creation is unaffected.
+
+**Snapping.** When accepted, the gesture is regularized:
+- Center and radius computed from detected vertex centroid (pixel space, then converted back to normalized world coords)
+- N evenly-spaced anchors placed at canonical vertex positions (aspect-ratio corrected)
+- Path replaced with clean N-gon perimeter (N+1 points, closed)
+- `polygonSpec` attached to the `ContourLoop` record
+
+**Musical mapping.** Each polygon side maps to a voice role and rhythmic identity:
+- Triangle (3) → `percussion` — triplet / 3-beat cycle
+- Square (4) → `percussion` — four-on-the-floor / 4-beat cycle
+- Pentagon (5) → `lead` — 5-beat odd meter
+- Hexagon (6) → `pad` — 6-step compound groove
+
+Every vertex is an accent onset (`accent: true`, `emphasis: 1.0`). Edges are traversal/sustain. One full perimeter = one bar. The N anchors fire N evenly-spaced notes per bar regardless of scene or harmonic rhythm.
+
+**Visual sigil.** Polygon loops render as canonical geometric sigils (not warped voice contours):
+- Full polygon outline (clean, not role-warped)
+- Inner polygon rotated π/sides (stacked lozenge feel)
+- Radial spokes centre → vertices
+- Vertex dots (active vertex glows brighter + shadow)
+- Active-edge retrace: completed edges bright, current edge with animated partial highlight
+- Slow drift rotation in dormant state — feels alive, not frozen
+- N-label below sigil
+
+Polygon loops still participate in the full system: fusion detection, call-and-response, motif memory, cadence events, scope harmonic contexts.
+
+**Key concept.** The polygon gesture is "ritual attraction" not "vector edit". The user draws a rough shape; the surface recognizes intent and snaps it to a canonical rhythmic cycle. The sigil-like rendering makes the relationship between shape and rhythm legible: square = four-on-the-floor is readable at a glance.
+
 ### Phase 9: Local Rhythm Gravity
 
 We then added proximity-based phrase locking, but in a very specific way: not as hard quantization, and not as a grid imposed from above.
@@ -183,6 +224,7 @@ At the moment, EchoSurface is roughly:
 - a hierarchical composition space where scopes create local harmonic worlds
 - a session-memory layer where repeated contour families condense into named motifs
 - a satellite-sigil ecology where dormant memories can be reawakened or migrated
+- a geometric ritual field where drawn polygon shapes snap to canonical rhythmic cycles
 
 It is not trying to be a DAW, piano roll, or synth workstation.
 

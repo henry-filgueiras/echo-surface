@@ -30,6 +30,8 @@ import {
   SCENE_EARLY_TRIGGER_MIN_GESTURES,
   SCENE_EARLY_TRIGGER_MIN_ROLES,
   SCENE_SEQUENCE,
+  POLYGON_MIN_DURATION_MS,
+  POLYGON_SIDE_ROLE,
   SCOPE_GESTURE_CLOSE_THRESHOLD,
   SCOPE_GESTURE_MIN_CIRCULARITY,
   SCOPE_GESTURE_MIN_DURATION_MS,
@@ -64,6 +66,7 @@ import {
   type PhraseNote,
   type PinchTracker,
   type PlaybackFlash,
+  type PolygonSpec,
   type RenderedMotifSatellite,
   type SceneName,
   type ScopeId,
@@ -102,8 +105,11 @@ import {
 } from "../surface/contour";
 import {
   applyGestureFieldToPath,
+  buildPolygonAnchors,
+  buildPolygonPath,
   buildResponsePoints,
   chooseHue,
+  detectPolygon,
   getResponseRole,
   inferVoiceRole,
   makeSurfacePoint,
@@ -137,6 +143,7 @@ import {
 } from "../music/engine";
 import {
   drawMotifSigil,
+  drawPolygonLoopSigil,
   drawScopeSigil,
   SIGIL_ZOOM_FADE,
   SIGIL_ZOOM_FULL,
@@ -1155,6 +1162,114 @@ export function EchoSurface({
     pushFlash(point(cx, cy, performance.now()), "echo", hue, 1.1, "bar");
   };
 
+  // ---------------------------------------------------------------------------
+  // Polygon loop spawner
+  // Creates a ContourLoop whose path and anchors are regularized to an n-gon.
+  // The polygon spec is kept on the loop so rendering can use the sigil mode.
+  // ---------------------------------------------------------------------------
+  const spawnPolygonLoop = (
+    rawPoints: NormalizedPoint[],
+    spec: PolygonSpec,
+  ) => {
+    const now = performance.now();
+    const size = sizeRef.current;
+
+    const role: VoiceRole = POLYGON_SIDE_ROLE[spec.sides] ?? "lead";
+    const roleHue = getLoopHue(role);
+
+    // Regularized polygon path (closed N-gon)
+    const polygonPath = buildPolygonPath(spec, size.width, size.height);
+
+    // Resolve scope context from polygon centre
+    const scopeForGesture = findScopeAt(spec.cx, spec.cy, scopesRef.current);
+    const { harmonic: effectiveHarmonic, scene: effectiveScene } =
+      resolveEffectiveScopeContext(
+        scopeForGesture?.id ?? null,
+        scopesRef.current,
+        harmonicStateRef.current,
+        sceneNameRef.current,
+      );
+
+    const currentBarIndex = getBarIndexAtTime(
+      now, clockStartMsRef.current, effectiveHarmonic,
+    );
+    const nextBarStartMs =
+      clockStartMsRef.current +
+      (currentBarIndex + 1) * getBarMs(effectiveHarmonic);
+
+    const energy = 0.84;
+
+    let loop = createLoopRecord({
+      id: loopIdRef.current++,
+      bornAt: now,
+      role,
+      hue: roleHue,
+      dialogueKind: "source",
+      energy,
+      points: polygonPath,
+      scheduledAtMs: nextBarStartMs,
+      synthetic: false,
+      clusterSize: 1,
+      scopeId: scopeForGesture?.id ?? null,
+    });
+
+    // Override anchors with evenly-spaced vertex anchors and attach polygon spec
+    loop.anchors = buildPolygonAnchors(spec, size.width, size.height);
+    loop.noteCount = spec.sides;
+    loop.desiredRegisterMidi = clamp(Math.round(77 - spec.cy * 22), 54, 84);
+    loop.polygonSpec = spec;
+
+    loop = registerLoopInMotifMemory({
+      loop,
+      harmonic: effectiveHarmonic,
+      chordSymbol: getChordForBar(
+        getBarNumberAtTime(nextBarStartMs, clockStartMsRef.current, effectiveHarmonic),
+        effectiveHarmonic,
+      ),
+      now,
+    });
+
+    if (scopeForGesture) {
+      scopeForGesture.loopIds.push(loop.id);
+    }
+
+    simulationRef.current.loops = [
+      ...simulationRef.current.loops,
+      loop,
+    ].slice(-MAX_LOOPS);
+
+    simulationRef.current.recentGestures = [
+      ...simulationRef.current.recentGestures,
+      {
+        timestamp: now,
+        centroid: { x: spec.cx, y: spec.cy, t: now },
+        durationMs: 800,
+        travel: spec.rFraction * TAU,
+        tapLike: false,
+        circularity: 0.88,
+        zigzag: 0.04,
+      },
+    ].slice(-18);
+
+    simulationRef.current.surfaceEnergy = clamp(
+      simulationRef.current.surfaceEnergy + 0.14 + energy * 0.06,
+      0.14,
+      1.2,
+    );
+    lastInteractionAtRef.current = now;
+
+    // Ritual impact flash at polygon centre
+    pushFlash(
+      point(spec.cx, spec.cy, now),
+      role,
+      roleHue,
+      1.1,
+      "bar",
+    );
+
+    syncMemory();
+  };
+
   const enterScope = (scopeId: ScopeId) => {
     const scope = scopesRef.current.find((s) => s.id === scopeId);
     if (!scope) return;
@@ -1267,29 +1382,44 @@ export function EchoSurface({
     const now = performance.now();
     const gestureDurationMs = Math.max(now - touch.bornAt, pathDuration(relativePoints), 1);
 
-    // ---- Scope creation gesture detection ----
-    // Large, slow, closed-loop circular draw → spawn a new musical scope instead of a voice
-    if (
-      touch.points.length >= 4 &&
-      gestureDurationMs >= SCOPE_GESTURE_MIN_DURATION_MS &&
-      !touch.previewRole // let explicit role seals still create voices
-    ) {
-      const summary = summarizeGesture(relativePoints, gestureDurationMs, []);
+    // ---- Polygon + Scope creation gesture detection ----
+    // Both require a minimum point count and no explicit role seal.
+    if (touch.points.length >= 4 && !touch.previewRole) {
       const firstWorld = touch.points[0];
       const lastWorld = touch.points[touch.points.length - 1];
       const closureDistance = distance(firstWorld, lastWorld);
 
+      // Polygon check first — cornered closed shapes snap to a rhythmic n-gon
       if (
-        summary.circularity >= SCOPE_GESTURE_MIN_CIRCULARITY &&
-        summary.loopiness >= SCOPE_GESTURE_MIN_LOOPINESS &&
-        summary.travel >= SCOPE_GESTURE_MIN_TRAVEL &&
-        closureDistance <= SCOPE_GESTURE_CLOSE_THRESHOLD
+        touch.points.length >= 6 &&
+        gestureDurationMs >= POLYGON_MIN_DURATION_MS
       ) {
-        spawnScope(touch.points, summary);
-        return; // do not create a voice phrase
+        const polygonSpec = detectPolygon(
+          relativePoints,
+          sizeRef.current.width,
+          sizeRef.current.height,
+        );
+        if (polygonSpec) {
+          spawnPolygonLoop(touch.points, polygonSpec);
+          return;
+        }
+      }
+
+      // Scope check — smooth, slow, circular draw → spawn a new musical scope
+      if (gestureDurationMs >= SCOPE_GESTURE_MIN_DURATION_MS) {
+        const summary = summarizeGesture(relativePoints, gestureDurationMs, []);
+        if (
+          summary.circularity >= SCOPE_GESTURE_MIN_CIRCULARITY &&
+          summary.loopiness >= SCOPE_GESTURE_MIN_LOOPINESS &&
+          summary.travel >= SCOPE_GESTURE_MIN_TRAVEL &&
+          closureDistance <= SCOPE_GESTURE_CLOSE_THRESHOLD
+        ) {
+          spawnScope(touch.points, summary);
+          return; // do not create a voice phrase
+        }
       }
     }
-    // ---- end scope gesture ----
+    // ---- end polygon / scope gesture ----
 
     const inferred = inferVoiceRole(
       relativePoints,
@@ -2116,63 +2246,85 @@ export function EchoSurface({
           loop.dialogueKind === "response"
             ? mix(loop.hue, RESPONSE_GLYPH_HUE, 0.6)
             : loop.hue;
-        const dormantPath = warpPathForLoop(
-          loop.points,
-          loop,
-          loopBarProgress * 0.22,
-          now,
-        );
-
-        context.save();
-        context.shadowBlur = 20 + loop.energy * 18 + cadenceGlow * 10;
-        context.shadowColor =
-          loop.dialogueKind === "response"
-            ? `hsla(${visualHue}, 84%, 74%, 0.18)`
-            : getRoleColor(loop.role, 0.18, 8, 4);
-        drawPolyline(
-          context,
-          size,
-          dormantPath,
-          loop.dialogueKind === "response"
-            ? `hsla(${visualHue}, 78%, 70%, ${0.1 + loop.energy * 0.08})`
-            : getRoleColor(loop.role, 0.08 + loop.energy * 0.08, 6, 4),
-          loop.role === "pad" ? 7.4 : loop.role === "bass" ? 6.4 : 4.8,
-        );
-        context.restore();
-
-        drawPolyline(
-          context,
-          size,
-          dormantPath,
-          loop.dialogueKind === "response"
-            ? `hsla(${visualHue}, 82%, 78%, ${0.18 + loop.energy * 0.14})`
-            : getRoleColor(loop.role, 0.18 + loop.energy * 0.12, 12, 8),
-          loop.role === "percussion" ? 1.8 : 2.1,
-        );
-
-        loop.anchors.forEach((anchor, index) => {
-          const note = loop.phraseNotes[index];
-          if (!note) {
+        // ── Polygon loops use sigil rendering; skip warped voice-path drawing ──
+        if (loop.polygonSpec) {
+          if (now < loop.scheduledAtMs) {
+            // Dormant state: quiet polygon sigil waits for its bar
+            drawPolygonLoopSigil(
+              context,
+              loop.polygonSpec,
+              size,
+              loop.hue,
+              loop.energy,
+              cam.zoom,
+              -1,
+              0,
+              cadenceGlow,
+              now,
+            );
             return;
           }
-
-          const nextAnchor =
-            loop.anchors[Math.min(index + 1, loop.anchors.length - 1)] ?? anchor;
-          drawNoteGlyph(
+          // Active polygon sigil drawn further below after cycleProgress is known
+        } else {
+          // ── Standard voice: dormant warped path ──────────────────────────────
+          const dormantPath = warpPathForLoop(
+            loop.points,
             loop,
-            anchor.point,
-            nextAnchor.point,
-            false,
-            note,
-            loopBarProgress * 0.2,
+            loopBarProgress * 0.22,
             now,
-            loopChordHue,
-            glyphBoost,
           );
-        });
 
-        if (now < loop.scheduledAtMs) {
-          return;
+          context.save();
+          context.shadowBlur = 20 + loop.energy * 18 + cadenceGlow * 10;
+          context.shadowColor =
+            loop.dialogueKind === "response"
+              ? `hsla(${visualHue}, 84%, 74%, 0.18)`
+              : getRoleColor(loop.role, 0.18, 8, 4);
+          drawPolyline(
+            context,
+            size,
+            dormantPath,
+            loop.dialogueKind === "response"
+              ? `hsla(${visualHue}, 78%, 70%, ${0.1 + loop.energy * 0.08})`
+              : getRoleColor(loop.role, 0.08 + loop.energy * 0.08, 6, 4),
+            loop.role === "pad" ? 7.4 : loop.role === "bass" ? 6.4 : 4.8,
+          );
+          context.restore();
+
+          drawPolyline(
+            context,
+            size,
+            dormantPath,
+            loop.dialogueKind === "response"
+              ? `hsla(${visualHue}, 82%, 78%, ${0.18 + loop.energy * 0.14})`
+              : getRoleColor(loop.role, 0.18 + loop.energy * 0.12, 12, 8),
+            loop.role === "percussion" ? 1.8 : 2.1,
+          );
+
+          loop.anchors.forEach((anchor, index) => {
+            const note = loop.phraseNotes[index];
+            if (!note) {
+              return;
+            }
+
+            const nextAnchor =
+              loop.anchors[Math.min(index + 1, loop.anchors.length - 1)] ?? anchor;
+            drawNoteGlyph(
+              loop,
+              anchor.point,
+              nextAnchor.point,
+              false,
+              note,
+              loopBarProgress * 0.2,
+              now,
+              loopChordHue,
+              glyphBoost,
+            );
+          });
+
+          if (now < loop.scheduledAtMs) {
+            return;
+          }
         }
 
         const elapsed = now - loop.scheduledAtMs;
@@ -2210,14 +2362,17 @@ export function EchoSurface({
           const anchor = loop.anchors[activeStepIndex];
           const nextAnchor =
             loop.anchors[Math.min(activeStepIndex + 1, loop.anchors.length - 1)] ?? anchor;
-          const flashedPoint = warpPointForRole(
-            anchor.point,
-            nextAnchor.point,
-            loop.role,
-            loop.motionSeed,
-            cycleProgress + anchor.drawRatio,
-            now,
-          );
+          // Polygon loops keep vertex positions crisp — no role warping at triggers
+          const flashedPoint = loop.polygonSpec
+            ? anchor.point
+            : warpPointForRole(
+                anchor.point,
+                nextAnchor.point,
+                loop.role,
+                loop.motionSeed,
+                cycleProgress + anchor.drawRatio,
+                now,
+              );
           const noteHue = activeNote.chordTone
             ? mix(getDialogueHue(loop, loopChordHue), loopChordHue, 0.18)
             : getDialogueHue(loop, loopChordHue);
@@ -2247,112 +2402,139 @@ export function EchoSurface({
           loop.lastTriggeredToken = triggerToken;
         }
 
-        const retracePath = warpPathForLoop(
-          buildPartialPath(loop.points, cycleProgress),
-          loop,
-          cycleProgress,
-          now,
-        );
-        context.save();
-        context.shadowBlur = 18 + loop.energy * 18 + cadenceGlow * 12;
-        context.shadowColor =
-          loop.dialogueKind === "response"
-            ? `hsla(${visualHue}, 88%, 80%, 0.24)`
-            : getRoleColor(loop.role, 0.24, 18, 10);
-        drawPolyline(
-          context,
-          size,
-          retracePath,
-          loop.dialogueKind === "response"
-            ? `hsla(${visualHue}, 92%, 84%, ${0.3 + loop.energy * 0.16})`
-            : getRoleColor(loop.role, 0.28 + loop.energy * 0.16, 20, 12),
-          loop.role === "pad" ? 4.8 : loop.role === "bass" ? 4.2 : 3.4,
-        );
-        context.restore();
+        // ── Active visuals — polygon sigil or standard retrace ──────────────────
+        let retracePath: NormalizedPoint[];
+        let head: NormalizedPoint;
 
-        const rawHead = samplePath(
-          loop.points,
-          pathDuration(loop.points) * cycleProgress,
-        );
-        const rawHeadNext = samplePath(
-          loop.points,
-          pathDuration(loop.points) * Math.min(1, cycleProgress + 0.04),
-        );
-        const head = warpPointForRole(
-          rawHead,
-          rawHeadNext,
-          loop.role,
-          loop.motionSeed,
-          cycleProgress,
-          now,
-        );
-        const activeRest = activeNote?.kind === "rest";
-        const headPixel = normalizedToPixels(head, size);
-        const headRadius =
-          loop.role === "pad" ? 34 : loop.role === "bass" ? 30 : loop.role === "echo" ? 32 : 26;
-        const headGlow = context.createRadialGradient(
-          headPixel.x,
-          headPixel.y,
-          0,
-          headPixel.x,
-          headPixel.y,
-          headRadius,
-        );
-        headGlow.addColorStop(
-          0,
-          loop.dialogueKind === "response"
-            ? `hsla(${visualHue}, 90%, 84%, ${activeRest ? 0.18 : 0.44})`
-            : getRoleColor(loop.role, activeRest ? 0.16 : 0.42, 18, 8),
-        );
-        headGlow.addColorStop(
-          0.56,
-          loop.dialogueKind === "response"
-            ? `hsla(${visualHue}, 82%, 72%, ${activeRest ? 0.08 : 0.18})`
-            : getRoleColor(loop.role, activeRest ? 0.08 : 0.16, 6, 2),
-        );
-        headGlow.addColorStop(
-          1,
-          loop.dialogueKind === "response"
-            ? `hsla(${visualHue}, 82%, 68%, 0)`
-            : getRoleColor(loop.role, 0, 0, 0),
-        );
-        context.fillStyle = headGlow;
-        context.beginPath();
-        context.arc(headPixel.x, headPixel.y, headRadius, 0, TAU);
-        context.fill();
-
-        drawRoleGlyph(
-          context,
-          loop.role,
-          headPixel.x,
-          headPixel.y,
-          6.2 + (activeNote?.accent ?? 0.4) * 3.2,
-          activeRest ? 0.4 : 0.88,
-          now * 0.0016,
-          loop.dialogueKind === "response" ? visualHue : undefined,
-          activeRest,
-        );
-
-        loop.anchors.forEach((anchor, index) => {
-          const note = loop.phraseNotes[index];
-          if (!note) {
-            return;
-          }
-
-          const nextAnchor =
-            loop.anchors[Math.min(index + 1, loop.anchors.length - 1)] ?? anchor;
-          drawNoteGlyph(
+        if (loop.polygonSpec) {
+          // Polygon: draw canonical sigil with live edge retrace
+          drawPolygonLoopSigil(
+            context,
+            loop.polygonSpec,
+            size,
+            loop.hue,
+            loop.energy,
+            cam.zoom,
+            cycleProgress,
+            activeStepIndex,
+            cadenceGlow,
+            now,
+          );
+          // Use raw path for fusion-detection snapshot (no role warping)
+          retracePath = buildPartialPath(loop.points, cycleProgress);
+          head = samplePath(
+            loop.points,
+            pathDuration(loop.points) * cycleProgress,
+          );
+        } else {
+          // Standard voice: retrace polyline + head glow + role glyph + note glyphs
+          retracePath = warpPathForLoop(
+            buildPartialPath(loop.points, cycleProgress),
             loop,
-            anchor.point,
-            nextAnchor.point,
-            index === activeStepIndex,
-            note,
             cycleProgress,
             now,
-            loopChordHue,
-            glyphBoost,
           );
-        });
+          context.save();
+          context.shadowBlur = 18 + loop.energy * 18 + cadenceGlow * 12;
+          context.shadowColor =
+            loop.dialogueKind === "response"
+              ? `hsla(${visualHue}, 88%, 80%, 0.24)`
+              : getRoleColor(loop.role, 0.24, 18, 10);
+          drawPolyline(
+            context,
+            size,
+            retracePath,
+            loop.dialogueKind === "response"
+              ? `hsla(${visualHue}, 92%, 84%, ${0.3 + loop.energy * 0.16})`
+              : getRoleColor(loop.role, 0.28 + loop.energy * 0.16, 20, 12),
+            loop.role === "pad" ? 4.8 : loop.role === "bass" ? 4.2 : 3.4,
+          );
+          context.restore();
+
+          const rawHead = samplePath(
+            loop.points,
+            pathDuration(loop.points) * cycleProgress,
+          );
+          const rawHeadNext = samplePath(
+            loop.points,
+            pathDuration(loop.points) * Math.min(1, cycleProgress + 0.04),
+          );
+          head = warpPointForRole(
+            rawHead,
+            rawHeadNext,
+            loop.role,
+            loop.motionSeed,
+            cycleProgress,
+            now,
+          );
+          const activeRest = activeNote?.kind === "rest";
+          const headPixel = normalizedToPixels(head, size);
+          const headRadius =
+            loop.role === "pad" ? 34 : loop.role === "bass" ? 30 : loop.role === "echo" ? 32 : 26;
+          const headGlow = context.createRadialGradient(
+            headPixel.x,
+            headPixel.y,
+            0,
+            headPixel.x,
+            headPixel.y,
+            headRadius,
+          );
+          headGlow.addColorStop(
+            0,
+            loop.dialogueKind === "response"
+              ? `hsla(${visualHue}, 90%, 84%, ${activeRest ? 0.18 : 0.44})`
+              : getRoleColor(loop.role, activeRest ? 0.16 : 0.42, 18, 8),
+          );
+          headGlow.addColorStop(
+            0.56,
+            loop.dialogueKind === "response"
+              ? `hsla(${visualHue}, 82%, 72%, ${activeRest ? 0.08 : 0.18})`
+              : getRoleColor(loop.role, activeRest ? 0.08 : 0.16, 6, 2),
+          );
+          headGlow.addColorStop(
+            1,
+            loop.dialogueKind === "response"
+              ? `hsla(${visualHue}, 82%, 68%, 0)`
+              : getRoleColor(loop.role, 0, 0, 0),
+          );
+          context.fillStyle = headGlow;
+          context.beginPath();
+          context.arc(headPixel.x, headPixel.y, headRadius, 0, TAU);
+          context.fill();
+
+          drawRoleGlyph(
+            context,
+            loop.role,
+            headPixel.x,
+            headPixel.y,
+            6.2 + (activeNote?.accent ?? 0.4) * 3.2,
+            activeRest ? 0.4 : 0.88,
+            now * 0.0016,
+            loop.dialogueKind === "response" ? visualHue : undefined,
+            activeRest,
+          );
+
+          loop.anchors.forEach((anchor, index) => {
+            const note = loop.phraseNotes[index];
+            if (!note) {
+              return;
+            }
+
+            const nextAnchor =
+              loop.anchors[Math.min(index + 1, loop.anchors.length - 1)] ?? anchor;
+            drawNoteGlyph(
+              loop,
+              anchor.point,
+              nextAnchor.point,
+              index === activeStepIndex,
+              note,
+              cycleProgress,
+              now,
+              loopChordHue,
+              glyphBoost,
+            );
+          });
+        }
 
         activeLoopSnapshots.push({
           loop,
