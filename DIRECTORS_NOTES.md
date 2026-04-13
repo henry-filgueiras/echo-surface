@@ -699,10 +699,37 @@ That would make EchoSurface feel less ephemeral when desired, while preserving t
 
 ## Good Next Steps If We Want High Reward
 
-- conductor gestures
+- **Tides** (designed, spec complete — see `TIDES_SPEC.md`)
+- conductor gestures (partially subsumed by Tides)
 - long-form ritual states / scene evolution
 - persistent hybrid roles from repeated fusion pairings
 - harmony that responds to ensemble behavior
+
+### Phase 16 (Designed): Tides — Gestural Force Fields
+
+Tides fill the missing gestural scale between phrases (small, creates a voice) and scopes (large closed loop, creates a world). A tide is a large, slow, open sweep across the canvas that does not add a new voice — instead, it modulates the existing ensemble as a propagating wave-front.
+
+**Detection.** A tide is distinguished from other gestures by three simultaneous conditions: the gesture spans >45% of the visible canvas in its longest axis, mean velocity is below a "slow and deliberate" threshold, and circularity is low (open sweep, not a closed loop). No mode switch needed — the gesture itself is the mode.
+
+**Types (inferred from shape):**
+- Upward sweep → **swell** (crescendo, brighten filters, expand register)
+- Downward sweep → **ebb** (decrescendo, darken, compress register)
+- Left-to-right → **rush** (tighten rhythm, increase density, shorten sustain)
+- Right-to-left → **linger** (loosen rhythm, increase sustain, more legato)
+- Spiral inward → **converge** (intensify, compress toward center pitch)
+- Spiral outward → **disperse** (thin texture, spread voices apart)
+
+**Propagation and decay.** The tide emanates from the gesture path as a wave-front traveling across the canvas. Phrases are affected as the wave passes through them. Effect intensity falls off with distance from the gesture path. Peak effect at wave-front passage, then exponential decay over ~4 bars. Multiple tides can overlap and compound.
+
+**Musical modulation.** Each tide type has a profile affecting five parameters: gain multiplier, filter cutoff offset, register shift (semitones), rhythm tightness scalar, and sustain multiplier. These are applied to each phrase's playback based on spatial proximity to the tide path.
+
+**Visual language.** Translucent gradient wave-front in tide-specific hue (swell=gold, ebb=indigo, rush=white, linger=violet, converge=amber, disperse=cyan). Phrases ripple as the wave passes through. Fading "high water mark" trail along the gesture path. At scope zoom-out, tides appear as weather patterns.
+
+**Scope awareness.** Tides drawn inside a scope only affect that scope's phrases. Root-level tides affect everything.
+
+**Why this feature.** It adds dynamics, tempo feel, register width, and density control through pure gesture — no new UI chrome. It connects to the existing "Conductor Gestures" and "Harmonic Weather" aspirations but through embodied drawing rather than automation. It makes silence active (an ebb tide is a way of drawing toward silence). And it deepens the performance skill curve: first you learn to draw melodies, then you learn to build worlds, then you learn to conduct the weather.
+
+Full implementation specification with function signatures, threshold values, and file paths: `TIDES_SPEC.md`
 
 ## If Another Chat Picks This Up Later
 
