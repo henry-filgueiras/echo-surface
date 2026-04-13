@@ -1,9 +1,13 @@
 import {
   TAU,
   VOICE_ROLE_STYLES,
+  type BindingMode,
+  type ContourLoop,
+  type FilamentPulse,
   type MotifRhythmSkeleton,
   type MotifSigil,
   type PolygonSpec,
+  type ResonanceFilament,
   type SceneName,
   type SurfaceSize,
   type VoiceRole,
@@ -612,5 +616,171 @@ export const drawPolygonLoopSigil = (
   ctx.fillStyle = `hsla(${hue}, 80%, 82%, ${isActive ? 0.46 : 0.18})`;
   ctx.fillText(String(sides), pxCx, pxCy + pxR + 15 / zoom);
 
+  ctx.restore();
+};
+
+// ── Bezier helpers ─────────────────────────────────────────────────────────────
+const bezierPoint = (
+  t: number,
+  ax: number, ay: number,
+  cx: number, cy: number,
+  bx: number, by: number,
+): [number, number] => {
+  const s = 1 - t;
+  return [s * s * ax + 2 * s * t * cx + t * t * bx,
+          s * s * ay + 2 * s * t * cy + t * t * by];
+};
+
+const MODE_HUE: Record<BindingMode, number> = {
+  "phase-align": 198,
+  "ratio-lock":  46,
+  "call-offset": 294,
+};
+
+/**
+ * Draws a luminous tether between two polygon sigils with travelling pulses.
+ * Must be called INSIDE the world-space transform (camera already applied).
+ */
+export const drawResonanceFilament = (
+  ctx: CanvasRenderingContext2D,
+  filament: ResonanceFilament,
+  loopA: ContourLoop,
+  loopB: ContourLoop,
+  size: SurfaceSize,
+  zoom: number,
+  now: number,
+): void => {
+  const specA = loopA.polygonSpec!;
+  const specB = loopB.polygonSpec!;
+
+  const ax = specA.cx * size.width;
+  const ay = specA.cy * size.height;
+  const bx = specB.cx * size.width;
+  const by = specB.cy * size.height;
+
+  const dx = bx - ax;
+  const dy = by - ay;
+  const len = Math.sqrt(dx * dx + dy * dy) || 1;
+  const bow = len * 0.18;
+  const perpX = (-dy / len) * bow;
+  const perpY = (dx / len) * bow;
+  const cpx = (ax + bx) * 0.5 + perpX;
+  const cpy = (ay + by) * 0.5 + perpY;
+
+  const hueA = loopA.hue;
+  const hueB = loopB.hue;
+  const hDiff = ((hueB - hueA + 540) % 360) - 180;
+  const blendHue = (hueA + hDiff * 0.5 + 360) % 360;
+  const modeHue = MODE_HUE[filament.mode];
+  const age = clamp((now - filament.bornAt) / 380, 0, 1);
+
+  ctx.save();
+
+  // Outer glow halo
+  ctx.beginPath();
+  ctx.moveTo(ax, ay);
+  ctx.quadraticCurveTo(cpx, cpy, bx, by);
+  ctx.strokeStyle = `hsla(${blendHue}, 74%, 62%, ${0.18 * age})`;
+  ctx.lineWidth = 5 / zoom;
+  ctx.shadowBlur = 10 / zoom;
+  ctx.shadowColor = `hsla(${blendHue}, 80%, 70%, 0.3)`;
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // Inner dashed tether
+  ctx.beginPath();
+  ctx.moveTo(ax, ay);
+  ctx.quadraticCurveTo(cpx, cpy, bx, by);
+  ctx.strokeStyle = `hsla(${blendHue}, 88%, 84%, ${0.48 * age})`;
+  ctx.lineWidth = 1.1 / zoom;
+  ctx.setLineDash([7 / zoom, 14 / zoom]);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Mode label at arc midpoint
+  const [mlx, mly] = bezierPoint(0.5, ax, ay, cpx, cpy, bx, by);
+  const mLabel = filament.mode === "ratio-lock"
+    ? `${specA.sides}:${specB.sides}`
+    : filament.mode === "phase-align" ? "≡" : "↠";
+  const fs = Math.max(8, 11) / zoom;
+  ctx.font = `${fs}px "Avenir Next Condensed","Arial Narrow",sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.shadowBlur = 7 / zoom;
+  ctx.shadowColor = `hsla(${modeHue}, 90%, 70%, 0.6)`;
+  ctx.fillStyle = `hsla(${modeHue}, 94%, 90%, ${0.78 * age})`;
+  ctx.fillText(mLabel, mlx, mly - 10 / zoom);
+  ctx.shadowBlur = 0;
+
+  // Travelling pulses
+  for (const pulse of filament.pulses) {
+    const pAge = now - pulse.bornAt;
+    const progress = clamp(pAge / pulse.ttl, 0, 1);
+    const effectiveT = pulse.dir === 1 ? progress : 1 - progress;
+    const fadeIn  = Math.min(pAge / 60, 1);
+    const fadeOut = Math.min((pulse.ttl - pAge) / 60, 1);
+    const alpha   = pulse.strength * fadeIn * fadeOut * age;
+    const pulseHue = pulse.dir === 1 ? hueA : hueB;
+    const [px, py] = bezierPoint(effectiveT, ax, ay, cpx, cpy, bx, by);
+
+    // Trail
+    for (let k = 1; k <= 3; k++) {
+      const trailT = clamp(effectiveT - pulse.dir * k * 0.04, 0, 1);
+      const [tx, ty] = bezierPoint(trailT, ax, ay, cpx, cpy, bx, by);
+      ctx.beginPath();
+      ctx.arc(tx, ty, (2.2 - k * 0.5) / zoom, 0, TAU);
+      ctx.fillStyle = `hsla(${pulseHue}, 88%, 88%, ${alpha * 0.28 / k})`;
+      ctx.fill();
+    }
+
+    // Head
+    ctx.shadowBlur = 12 / zoom;
+    ctx.shadowColor = `hsla(${pulseHue}, 94%, 88%, ${alpha * 0.9})`;
+    ctx.beginPath();
+    ctx.arc(px, py, 3.4 / zoom, 0, TAU);
+    ctx.fillStyle = `hsla(${pulseHue}, 96%, 94%, ${alpha})`;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+
+  ctx.restore();
+};
+
+/**
+ * Preview tether while dragging from one polygon to another.
+ * Must be called INSIDE the world-space transform.
+ */
+export const drawFilamentPreview = (
+  ctx: CanvasRenderingContext2D,
+  fromSpec: PolygonSpec,
+  toWorldX: number,
+  toWorldY: number,
+  fromHue: number,
+  size: SurfaceSize,
+  zoom: number,
+): void => {
+  const ax = fromSpec.cx * size.width;
+  const ay = fromSpec.cy * size.height;
+  const bx = toWorldX * size.width;
+  const by = toWorldY * size.height;
+  const dx = bx - ax;
+  const dy = by - ay;
+  const len = Math.sqrt(dx * dx + dy * dy) || 1;
+  const bow = len * 0.15;
+  const cpx = (ax + bx) * 0.5 + (-dy / len) * bow;
+  const cpy = (ay + by) * 0.5 + (dx / len) * bow;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(ax, ay);
+  ctx.quadraticCurveTo(cpx, cpy, bx, by);
+  ctx.strokeStyle = `hsla(${fromHue}, 80%, 78%, 0.52)`;
+  ctx.lineWidth = 1.6 / zoom;
+  ctx.setLineDash([6 / zoom, 10 / zoom]);
+  ctx.shadowBlur = 8 / zoom;
+  ctx.shadowColor = `hsla(${fromHue}, 80%, 70%, 0.4)`;
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.shadowBlur = 0;
   ctx.restore();
 };

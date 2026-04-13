@@ -214,6 +214,28 @@ export type AudioEngine = {
   masterLevel: number;
 };
 
+// ── Resonance Filament: phase binding between two canonical polygon loops ───────
+export type BindingMode = "phase-align" | "ratio-lock" | "call-offset";
+
+export type FilamentPulse = {
+  t: number;        // 0=at A, 1=at B (effective position regardless of dir)
+  dir: 1 | -1;      // 1 = A→B, -1 = B→A
+  strength: number;
+  bornAt: number;
+  ttl: number;      // ms to complete full traversal
+};
+
+export type ResonanceFilament = {
+  id: number;
+  loopIdA: number;
+  loopIdB: number;
+  mode: BindingMode;
+  bornAt: number;
+  lastStepA: number;   // last activeStepIndex seen for loop A (for edge-detect)
+  lastStepB: number;
+  pulses: FilamentPulse[];
+};
+
 export type SimulationState = {
   activeTouches: Map<number, ActiveTouch>;
   loops: ContourLoop[];
@@ -221,6 +243,7 @@ export type SimulationState = {
   recentGestures: RecentGesture[];
   cadenceEvents: CadenceEvent[];
   fusionVoices: FusionVoice[];
+  filaments: ResonanceFilament[];
   surfaceEnergy: number;
 };
 

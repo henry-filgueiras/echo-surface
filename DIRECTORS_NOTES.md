@@ -207,6 +207,25 @@ The principle is:
 
 `phrases near each other may rhyme in time, but they should not snap into sameness`
 
+### Phase 14: Resonance Filaments — Phase Binding Between Polygon Loops
+
+Canonical polygon loops can now be bound together into **polyrhythmic ecosystems** through resonance filaments.
+
+**Interaction.** Drag from an active polygon sigil to another active polygon sigil. A dashed preview tether trails the finger. On release over a target polygon, a filament is created. Tap near the midpoint of an existing filament to cycle its binding mode.
+
+**Binding modes.** Three modes are supported:
+- **ratio-lock** (default): Both loops exchange pulses at their own step rate, making the N_A:N_B polyrhythm visually legible. Triangle↔square shows 3:4, pentagon↔square shows 5:4, square↔square shows synchronized pulse.
+- **phase-align**: On each bar boundary, loop B's phase is nudged to align with loop A. Pulses travel both directions simultaneously. The pair gradually converges to rhythmic unison despite different step counts.
+- **call-offset**: Pulses travel only A→B. When each pulse arrives at B, a resonance tone is scheduled at B's harmonic context — effectively making A call, B answer, with travel time as the offset.
+
+**Visual tether.** Filaments render inside the world-space camera pass (so they zoom/pan with sigils). The tether is a quadratic Bezier arc bowed slightly perpendicular to the AB line. Two layers: outer glow halo + inner dashed line. The binding mode label appears at the arc midpoint: `3:4` for ratio-lock, `≡` for phase-align, `↠` for call-offset. Mode hues: phase-align = cyan, ratio-lock = amber, call-offset = magenta.
+
+**Travelling pulses.** Each polygon step event spawns a pulse on all connected filaments. Pulses travel along the Bezier curve, with a short comet trail behind them. Travel time is proportional to the geometric distance between sigil centres, roughly half a beat minimum. Pulses are hue-colored by their source polygon.
+
+**Filament lifecycle.** If either polygon loop is evicted (e.g., when MAX_LOOPS is exceeded), its filaments are automatically pruned. Max filaments is bounded by MAX_LOOPS^2 in practice but is not enforced separately.
+
+**Key concept.** The filament makes the polyrhythm legible — you can *see* 3:4 happening as three pulses chase four pulses across the same arc. The goal is to make the surface feel like a living organism where rhythmic relationships are visible relationships.
+
 ## What The Surface Is Now
 
 At the moment, EchoSurface is roughly:
@@ -225,6 +244,7 @@ At the moment, EchoSurface is roughly:
 - a session-memory layer where repeated contour families condense into named motifs
 - a satellite-sigil ecology where dormant memories can be reawakened or migrated
 - a geometric ritual field where drawn polygon shapes snap to canonical rhythmic cycles
+- a polyrhythmic ecosystem where polygon loops can be bound by resonance filaments that make rhythmic ratios visible and audible
 
 It is not trying to be a DAW, piano roll, or synth workstation.
 

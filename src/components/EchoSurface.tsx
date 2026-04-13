@@ -66,8 +66,11 @@ import {
   type PhraseNote,
   type PinchTracker,
   type PlaybackFlash,
+  type BindingMode,
+  type FilamentPulse,
   type PolygonSpec,
   type RenderedMotifSatellite,
+  type ResonanceFilament,
   type SceneName,
   type ScopeId,
   type ScopeRecord,
@@ -142,8 +145,10 @@ import {
   midiToFrequency,
 } from "../music/engine";
 import {
+  drawFilamentPreview,
   drawMotifSigil,
   drawPolygonLoopSigil,
+  drawResonanceFilament,
   drawScopeSigil,
   SIGIL_ZOOM_FADE,
   SIGIL_ZOOM_FULL,
@@ -191,10 +196,18 @@ export { isSurfacePreset, type SurfacePreset } from "../surface/model";
 //     any in-progress musical gesture is discarded.
 //   • There is no state in which the same gesture drives both camera and voice.
 // ---------------------------------------------------------------------------
+type FilamentDragState = {
+  pointerId: number;
+  fromLoopId: number;
+  currentWorldX: number;
+  currentWorldY: number;
+};
+
 type GestureMode =
   | { kind: "idle" }
   | { kind: "musical"; pointerId: number }
   | { kind: "motif-drag"; pointerId: number }
+  | { kind: "filament-drag"; pointerId: number }
   | {
       kind: "camera";
       id0: number; // first pointer
@@ -236,6 +249,7 @@ export function EchoSurface({
     recentGestures: [],
     cadenceEvents: [],
     fusionVoices: [],
+    filaments: [],
     surfaceEnergy: 0.18,
   });
   const harmonicStateRef = useRef<HarmonicState>(DEFAULT_HARMONIC_STATE);
@@ -260,6 +274,10 @@ export function EchoSurface({
   const motifsRef = useRef<MotifRecord[]>([]);
   const motifSatellitesRef = useRef<RenderedMotifSatellite[]>([]);
   const motifDragRef = useRef<MotifDragState | null>(null);
+  const filamentDragRef = useRef<FilamentDragState | null>(null);
+  const filamentIdRef = useRef(0);
+  // Tracks last seen activeStepIndex per loop, for pulse edge-detection
+  const filamentStepTrackerRef = useRef<Map<number, number>>(new Map());
   const cameraRef = useRef<CameraState>({
     viewCx: 0.5, viewCy: 0.5, zoom: 1,
     targetViewCx: 0.5, targetViewCy: 0.5, targetZoom: 1,
@@ -2709,6 +2727,132 @@ export function EchoSurface({
         );
       });
 
+      // ── Resonance filaments: update pulses, render, audio coupling ───────────
+      {
+        const harmonic = harmonicStateRef.current;
+        const beatMs = getBeatMs(harmonic);
+
+        // Prune filaments whose constituent loops are no longer alive
+        const liveLoopIds = new Set(state.loops.map((l) => l.id));
+        state.filaments = state.filaments.filter(
+          (f) => liveLoopIds.has(f.loopIdA) && liveLoopIds.has(f.loopIdB),
+        );
+
+        state.filaments.forEach((filament) => {
+          const loopA = state.loops.find((l) => l.id === filament.loopIdA);
+          const loopB = state.loops.find((l) => l.id === filament.loopIdB);
+          if (!loopA?.polygonSpec || !loopB?.polygonSpec) return;
+
+          const specA = loopA.polygonSpec;
+          const specB = loopB.polygonSpec;
+
+          // Travel time: proportional to distance between polygon centres
+          const ax = specA.cx, ay = specA.cy;
+          const bx = specB.cx, by = specB.cy;
+          const dist = Math.hypot(bx - ax, by - ay);
+          const travelMs = Math.max(beatMs * 0.5, dist * 1800);
+
+          // Detect step edges using the loop's anchor timeline
+          const durationMsA = getBarMs(harmonic) * loopA.loopBars;
+          const durationMsB = getBarMs(harmonic) * loopB.loopBars;
+
+          const cycleProgressA = loopA.scheduledAtMs <= now
+            ? ((now - loopA.scheduledAtMs) % durationMsA) / durationMsA
+            : -1;
+          const cycleProgressB = loopB.scheduledAtMs <= now
+            ? ((now - loopB.scheduledAtMs) % durationMsB) / durationMsB
+            : -1;
+
+          const stepA = cycleProgressA >= 0
+            ? Math.floor(cycleProgressA * specA.sides)
+            : -1;
+          const stepB = cycleProgressB >= 0
+            ? Math.floor(cycleProgressB * specB.sides)
+            : -1;
+
+          // Expire finished pulses
+          filament.pulses = filament.pulses.filter(
+            (p) => now - p.bornAt < p.ttl,
+          );
+
+          // Spawn A→B pulse on each new step of A
+          if (stepA >= 0 && stepA !== filament.lastStepA) {
+            filament.lastStepA = stepA;
+            filament.pulses.push({
+              t: 0, dir: 1, strength: 0.85 + stepA === 0 ? 0.15 : 0,
+              bornAt: now, ttl: travelMs,
+            });
+            // call-offset mode: also trigger a resonance note at B when pulse arrives
+            if (filament.mode === "call-offset") {
+              const arrivalMs = now + travelMs;
+              const loopBMidi = loopB.phraseNotes.length > 0
+                ? loopB.phraseNotes[0].midi
+                : loopA.phraseNotes.length > 0 ? loopA.phraseNotes[0].midi + 7 : 67;
+              // Schedule a synthetic tone at arrival time using a small timeout
+              const delay = Math.max(0, arrivalMs - performance.now());
+              setTimeout(() => {
+                playMelodicTone({
+                  midi: loopBMidi,
+                  hue: mixHue(loopA.hue, loopB.hue, 0.5),
+                  accent: 0.52,
+                  durationMs: beatMs * 0.38,
+                  voice: loopB.role,
+                });
+              }, delay);
+            }
+          }
+
+          // Spawn B→A pulse on each new step of B (for ratio-lock and phase-align)
+          if (
+            stepB >= 0 &&
+            stepB !== filament.lastStepB &&
+            filament.mode !== "call-offset"
+          ) {
+            filament.lastStepB = stepB;
+            filament.pulses.push({
+              t: 0, dir: -1, strength: 0.82 + stepB === 0 ? 0.15 : 0,
+              bornAt: now, ttl: travelMs,
+            });
+          }
+
+          // phase-align: on bar boundary sync bar phase of B to A
+          if (
+            filament.mode === "phase-align" &&
+            stepA === 0 &&
+            filament.lastStepA !== 0
+          ) {
+            const barMs = getBarMs(harmonic);
+            const aPhaseOffset = (now - loopA.scheduledAtMs) % barMs;
+            const bPhaseOffset = (now - loopB.scheduledAtMs) % barMs;
+            if (Math.abs(aPhaseOffset - bPhaseOffset) > beatMs * 0.08) {
+              // nudge loopB's schedule to align with loopA
+              loopB.scheduledAtMs = loopA.scheduledAtMs;
+            }
+          }
+
+          // Render the filament tether + pulses
+          drawResonanceFilament(context, filament, loopA, loopB, size, cam.zoom, now);
+        });
+
+        // Draw filament-drag preview tether
+        const fd = filamentDragRef.current;
+        if (fd) {
+          const fromLoop = state.loops.find((l) => l.id === fd.fromLoopId);
+          if (fromLoop?.polygonSpec) {
+            drawFilamentPreview(
+              context,
+              fromLoop.polygonSpec,
+              fd.currentWorldX,
+              fd.currentWorldY,
+              fromLoop.hue,
+              size,
+              cam.zoom,
+            );
+          }
+        }
+      }
+      // ── end resonance filaments ───────────────────────────────────────────────
+
       for (const touch of state.activeTouches.values()) {
         const liveProgress = clamp((now - touch.bornAt) / 1200, 0, 1);
         const liveDurationMs = Math.max(now - touch.bornAt, 1);
@@ -3137,6 +3281,61 @@ export function EchoSurface({
   // helpers used by the state-machine touch handlers
   // -------------------------------------------------------------------------
 
+  /**
+   * Returns the active polygon ContourLoop under the given screen coords, if any.
+   * Uses world-space hit detection with a 1.4x radius margin.
+   */
+  const getPolygonLoopHit = (screenX: number, screenY: number): ContourLoop | null => {
+    const cam = cameraRef.current;
+    const size = sizeRef.current;
+    const worldNormX = (screenX / size.width - 0.5) / cam.zoom + cam.viewCx;
+    const worldNormY = (screenY / size.height - 0.5) / cam.zoom + cam.viewCy;
+    const worldPxX = worldNormX * size.width;
+    const worldPxY = worldNormY * size.height;
+    const minDim = Math.min(size.width, size.height);
+    const now = performance.now();
+    for (const loop of simulationRef.current.loops) {
+      if (!loop.polygonSpec || now < loop.scheduledAtMs) continue;
+      const spec = loop.polygonSpec;
+      const pxCx = spec.cx * size.width;
+      const pxCy = spec.cy * size.height;
+      const pxR  = spec.rFraction * minDim;
+      if (Math.hypot(worldPxX - pxCx, worldPxY - pxCy) <= pxR * 1.4) {
+        return loop;
+      }
+    }
+    return null;
+  };
+
+  /**
+   * Returns the filament whose arc midpoint is within ~20px of the given screen coords.
+   * Used to cycle binding mode on tap.
+   */
+  const getFilamentHit = (screenX: number, screenY: number): ResonanceFilament | null => {
+    const cam = cameraRef.current;
+    const size = sizeRef.current;
+    const worldNormX = (screenX / size.width - 0.5) / cam.zoom + cam.viewCx;
+    const worldNormY = (screenY / size.height - 0.5) / cam.zoom + cam.viewCy;
+    const worldPxX = worldNormX * size.width;
+    const worldPxY = worldNormY * size.height;
+    const hitRadius = 22 / cam.zoom; // world-space pixels
+    for (const fil of simulationRef.current.filaments) {
+      const loopA = simulationRef.current.loops.find((l) => l.id === fil.loopIdA);
+      const loopB = simulationRef.current.loops.find((l) => l.id === fil.loopIdB);
+      if (!loopA?.polygonSpec || !loopB?.polygonSpec) continue;
+      const ax = loopA.polygonSpec.cx * size.width;
+      const ay = loopA.polygonSpec.cy * size.height;
+      const bx = loopB.polygonSpec.cx * size.width;
+      const by = loopB.polygonSpec.cy * size.height;
+      const midX = (ax + bx) * 0.5;
+      const midY = (ay + by) * 0.5;
+      if (Math.hypot(worldPxX - midX, worldPxY - midY) <= hitRadius) {
+        return fil;
+      }
+    }
+    return null;
+  };
+
   /** Compute screen-normalised coords for a pointer event relative to the surface element */
   const getScreenNorm = (event: ReactPointerEvent<HTMLDivElement>, bounds: DOMRect) => ({
     sx: (event.clientX - bounds.left) / bounds.width,
@@ -3183,7 +3382,7 @@ export function EchoSurface({
     const screenY = event.clientY - bounds.top;
     const mode = gestureModeRef.current;
 
-    // ---- idle → motif-drag or musical ----
+    // ---- idle → motif-drag or filament-drag or musical ----
     if (mode.kind === "idle") {
       const motifHit = getMotifHit(screenX, screenY);
       if (motifHit) {
@@ -3202,6 +3401,35 @@ export function EchoSurface({
           dragging: false,
         };
         gestureModeRef.current = { kind: "motif-drag", pointerId: event.pointerId };
+        lastInteractionAtRef.current = performance.now();
+        return;
+      }
+
+      // Tap on a filament midpoint → cycle its binding mode
+      const filamentHit = getFilamentHit(screenX, screenY);
+      if (filamentHit) {
+        const modes: BindingMode[] = ["ratio-lock", "phase-align", "call-offset"];
+        const next = modes[(modes.indexOf(filamentHit.mode) + 1) % modes.length];
+        filamentHit.mode = next;
+        lastInteractionAtRef.current = performance.now();
+        return;
+      }
+
+      // Polygon sigil → begin filament drag (connect two polygons)
+      const polygonHit = getPolygonLoopHit(screenX, screenY);
+      if (polygonHit) {
+        const cam = cameraRef.current;
+        const size = sizeRef.current;
+        const worldNormX = (screenX / size.width - 0.5) / cam.zoom + cam.viewCx;
+        const worldNormY = (screenY / size.height - 0.5) / cam.zoom + cam.viewCy;
+        surface.setPointerCapture(event.pointerId);
+        filamentDragRef.current = {
+          pointerId: event.pointerId,
+          fromLoopId: polygonHit.id,
+          currentWorldX: worldNormX,
+          currentWorldY: worldNormY,
+        };
+        gestureModeRef.current = { kind: "filament-drag", pointerId: event.pointerId };
         lastInteractionAtRef.current = performance.now();
         return;
       }
@@ -3302,6 +3530,18 @@ export function EchoSurface({
       ) {
         motifDrag.dragging = true;
       }
+      lastInteractionAtRef.current = performance.now();
+      return;
+    }
+
+    // ---- filament-drag ----
+    if (mode.kind === "filament-drag" && mode.pointerId === event.pointerId) {
+      const fd = filamentDragRef.current;
+      if (!fd) return;
+      const { sx: screenNormX, sy: screenNormY } = getScreenNorm(event, bounds);
+      const [worldX, worldY] = screenToWorld(screenNormX, screenNormY, cameraRef.current);
+      fd.currentWorldX = worldX;
+      fd.currentWorldY = worldY;
       lastInteractionAtRef.current = performance.now();
       return;
     }
@@ -3432,6 +3672,54 @@ export function EchoSurface({
       return;
     }
 
+    // ---- filament-drag ends: create filament if released over another polygon ----
+    if (mode.kind === "filament-drag" && mode.pointerId === event.pointerId) {
+      const fd = filamentDragRef.current;
+      if (fd) {
+        const bounds = surface.getBoundingClientRect();
+        const screenX = event.clientX - bounds.left;
+        const screenY = event.clientY - bounds.top;
+        const targetLoop = getPolygonLoopHit(screenX, screenY);
+        if (targetLoop && targetLoop.id !== fd.fromLoopId) {
+          const sim = simulationRef.current;
+          const pairKey = [fd.fromLoopId, targetLoop.id].sort().join("-");
+          const alreadyExists = sim.filaments.some(
+            (f) =>
+              (f.loopIdA === fd.fromLoopId && f.loopIdB === targetLoop.id) ||
+              (f.loopIdA === targetLoop.id && f.loopIdB === fd.fromLoopId),
+          );
+          if (!alreadyExists) {
+            sim.filaments.push({
+              id: ++filamentIdRef.current,
+              loopIdA: fd.fromLoopId,
+              loopIdB: targetLoop.id,
+              mode: "ratio-lock",
+              bornAt: performance.now(),
+              lastStepA: -1,
+              lastStepB: -1,
+              pulses: [],
+            });
+            // phase-align: snap both loops to the same bar phase
+            const loopA = sim.loops.find((l) => l.id === fd.fromLoopId);
+            const loopB = sim.loops.find((l) => l.id === targetLoop.id);
+            if (loopA && loopB) {
+              const now = performance.now();
+              const phaseRef = loopA.scheduledAtMs;
+              const barMs = getBarMs(harmonicStateRef.current);
+              // Align loopB phase to loopA
+              const offset = ((now - phaseRef) % barMs + barMs) % barMs;
+              loopB.scheduledAtMs = now - offset + barMs;
+            }
+          }
+          void pairKey; // used above for alreadyExists check clarity
+        }
+        filamentDragRef.current = null;
+      }
+      gestureModeRef.current = { kind: "idle" };
+      releaseCapture(surface, event.pointerId);
+      return;
+    }
+
     // ---- musical gesture ends → finalize into voice ----
     if (mode.kind === "musical" && mode.pointerId === event.pointerId) {
       finalizeTouch(event.pointerId);
@@ -3463,6 +3751,13 @@ export function EchoSurface({
 
     if (mode.kind === "motif-drag" && mode.pointerId === event.pointerId) {
       motifDragRef.current = null;
+      gestureModeRef.current = { kind: "idle" };
+      releaseCapture(surface, event.pointerId);
+      return;
+    }
+
+    if (mode.kind === "filament-drag" && mode.pointerId === event.pointerId) {
+      filamentDragRef.current = null;
       gestureModeRef.current = { kind: "idle" };
       releaseCapture(surface, event.pointerId);
       return;
