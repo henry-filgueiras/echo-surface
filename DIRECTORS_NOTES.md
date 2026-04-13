@@ -334,6 +334,34 @@ The sigil layers are: background halo → outer scene rings → radial spokes �
 
 **Conceptual note:** The sigil is the scope's identity at rest: a compressed symbolic artifact representing its complete musical state. When you can see three scopes at once, you can read them as three distinct ritual objects without needing to enter any of them. This is semantic compression through symbolic representation.
 
+### Phase 13: Instrument-Grade Touch Interaction
+
+The previous touch handling was ad hoc: pinch detection happened mid-flight inside `moveTouch` by counting active pointers, retroactively marking both touches as `isPinch`, and relying on `finalizeTouch` to skip them. This caused several failure modes:
+
+- A brief window where two-finger gestures recorded musical points before the pinch was recognized
+- Zoom anchoring that computed world-space distance between fingers instead of screen-space, making zoom drift unpredictably
+- Pan correction that called `screenToWorld` on already-world-coordinate values, resulting in no pan effect at all
+- Wheel zoom that read from the lerp-lagged `cam.zoom` instead of `cam.targetZoom`, causing drift when scrolling rapidly
+
+The fix is a strict explicit state machine called `GestureMode` (local to `EchoSurface.tsx`):
+
+- `idle` — no pointers active
+- `musical` — exactly one finger; records voice gesture points
+- `camera` — exactly two fingers; drives pinch-zoom and pan only
+- `motif-drag` — one finger dragging a dormant sigil into a new scope
+
+The critical rule: when a second finger goes down while in `musical`, the in-progress musical gesture is immediately discarded (no voice emits), and the state transitions to `camera`. There is no state in which a gesture simultaneously produces both a voice and camera movement.
+
+Zoom anchoring is now computed with the correct formula in both contexts:
+
+- **Pinch zoom** stores an `anchorWorldX/Y` at the moment the second finger lands — the world point under the screen-space centroid of the two touches. Each subsequent move event computes `newZoom` as an absolute ratio `initialZoom * (currentDist / initialDist)` (no delta accumulation), then sets `targetViewCx = anchorWorldX - (centroidScreenX - 0.5) / newZoom`. The anchor world point is guaranteed to remain under the live centroid by identity.
+
+- **Wheel zoom** now anchors against `targetZoom` and `targetViewCx/Cy` (not the lerp-lagged actual values), so rapid wheel events accumulate correctly instead of drifting.
+
+The `isPinch` field was removed from `ActiveTouch` since the state machine makes it redundant. `PinchTracker` remains in `model.ts` for backward type compatibility but is no longer used operationally.
+
+This phase prioritized iPad and touch-first behavior as a precondition for any future interaction work.
+
 ## Current Implementation Shape
 
 Most of the intelligence currently lives in:
@@ -363,6 +391,7 @@ Important systems already present in `EchoSurface.tsx`:
 - scene morphing state machine (verse/chorus/bridge/drop) with early-trigger logic
 - scope hierarchy: ScopeRecord tree, CameraState, semantic zoom, scope gesture creation
 - clock emitter rendering and scope breadcrumb UI
+- explicit GestureMode interaction state machine (idle / musical / camera / motif-drag)
 
 This is powerful, but also means the main surface file is becoming the entire instrument brain. If the project keeps growing, it may be worth extracting pure musical logic into separate modules without losing the fast, sketch-like iteration style that got us here.
 

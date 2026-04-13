@@ -12,8 +12,6 @@ export type ActiveTouch = {
   previewRole: VoiceRole | null;
   points: NormalizedPoint[];
   travel: number;
-  /** true when this pointer is consumed by a two-finger pinch gesture */
-  isPinch: boolean;
 };
 
 export type HarmonicState = {
@@ -612,13 +610,24 @@ export type CameraState = {
   focusScopeId: ScopeId | null;
 };
 
-/** Tracks an in-progress two-pointer pinch gesture */
+/**
+ * Tracks an in-progress two-pointer pinch gesture.
+ * Replaced by GestureMode in EchoSurface — kept for backward type compatibility.
+ * @deprecated use GestureMode state machine instead
+ */
 export type PinchTracker = {
   id0: number;
   id1: number;
   lastDist: number; // normalised screen distance
   lastMidX: number; // normalised screen midpoint
   lastMidY: number;
+  /** World-space anchor point under the initial pinch centroid */
+  anchorWorldX: number;
+  anchorWorldY: number;
+  /** Zoom level at pinch start — used for absolute-ratio zoom computation */
+  initialZoom: number;
+  /** Screen-space distance at pinch start */
+  initialDist: number;
 } | null;
 
 // Scope gesture detection thresholds

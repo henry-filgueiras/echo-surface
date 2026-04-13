@@ -169,6 +169,42 @@ import {
 
 export { isSurfacePreset, type SurfacePreset } from "../surface/model";
 
+// ---------------------------------------------------------------------------
+// Interaction state machine
+// ---------------------------------------------------------------------------
+// The surface enforces a strict mode separation:
+//   idle        — no pointers active
+//   musical     — exactly one pointer drawing a voice gesture
+//   camera      — exactly two pointers driving pinch-zoom / pan
+//   motif-drag  — one pointer dragging a dormant motif sigil
+//
+// Rules:
+//   • A single finger can ONLY produce musical interaction (or motif drag).
+//   • Two fingers ALWAYS mean camera. The moment a second pointer goes down,
+//     any in-progress musical gesture is discarded.
+//   • There is no state in which the same gesture drives both camera and voice.
+// ---------------------------------------------------------------------------
+type GestureMode =
+  | { kind: "idle" }
+  | { kind: "musical"; pointerId: number }
+  | { kind: "motif-drag"; pointerId: number }
+  | {
+      kind: "camera";
+      id0: number; // first pointer
+      id1: number; // second pointer
+      // Screen-normalised (0-1) positions, updated on every move event
+      screen0X: number;
+      screen0Y: number;
+      screen1X: number;
+      screen1Y: number;
+      // Pinch anchor: world point under the centroid at gesture start (fixed)
+      anchorWorldX: number;
+      anchorWorldY: number;
+      // Reference values for absolute zoom-ratio computation (no drift)
+      initialZoom: number;
+      initialDist: number; // screen-space hypotenuse at start
+    };
+
 export function EchoSurface({
   preset,
   captureMode = false,
@@ -222,7 +258,8 @@ export function EchoSurface({
     targetViewCx: 0.5, targetViewCy: 0.5, targetZoom: 1,
     focusScopeId: null,
   });
-  const pinchRef = useRef<PinchTracker>(null);
+  const pinchRef = useRef<PinchTracker>(null); // kept for type compat, logic lives in gestureModeRef
+  const gestureModeRef = useRef<GestureMode>({ kind: "idle" });
   const [harmonicState, setHarmonicState] = useState(DEFAULT_HARMONIC_STATE);
   const [memory, setMemory] = useState<MemoryChip[]>([]);
   const [sessionMemory, setSessionMemory] = useState<SessionMemorySummary>({
@@ -1223,11 +1260,6 @@ export function EchoSurface({
 
     simulationRef.current.activeTouches.delete(pointerId);
     syncActiveCount();
-
-    // Skip finalization for pinch participants – they drove the camera
-    if (touch.isPinch) {
-      return;
-    }
 
     const relativePoints = touch.points.map((current) =>
       point(current.x, current.y, current.t - touch.bornAt),
@@ -2919,90 +2951,161 @@ export function EchoSurface({
         );
       });
 
+  // -------------------------------------------------------------------------
+  // helpers used by the state-machine touch handlers
+  // -------------------------------------------------------------------------
+
+  /** Compute screen-normalised coords for a pointer event relative to the surface element */
+  const getScreenNorm = (event: ReactPointerEvent<HTMLDivElement>, bounds: DOMRect) => ({
+    sx: (event.clientX - bounds.left) / bounds.width,
+    sy: (event.clientY - bounds.top) / bounds.height,
+  });
+
+  /**
+   * Initialise two-finger camera mode.
+   * id0 / s0* refer to the first finger already active; id1 / s1* to the new one.
+   * The pinch anchor is computed using the TARGET camera state so rapid wheel/pinch
+   * sequences accumulate correctly without drift.
+   */
+  const beginCameraMode = (
+    id0: number, s0x: number, s0y: number,
+    id1: number, s1x: number, s1y: number,
+  ) => {
+    const cam = cameraRef.current;
+    const midX = (s0x + s1x) * 0.5;
+    const midY = (s0y + s1y) * 0.5;
+    // Use target values so anchor is stable even during a mid-lerp camera
+    const anchorWorldX = (midX - 0.5) / cam.targetZoom + cam.targetViewCx;
+    const anchorWorldY = (midY - 0.5) / cam.targetZoom + cam.targetViewCy;
+    const initialDist = Math.hypot(s1x - s0x, s1y - s0y);
+
+    gestureModeRef.current = {
+      kind: "camera",
+      id0, screen0X: s0x, screen0Y: s0y,
+      id1, screen1X: s1x, screen1Y: s1y,
+      anchorWorldX, anchorWorldY,
+      initialZoom: cam.targetZoom,
+      initialDist: Math.max(initialDist, 0.001),
+    };
+  };
+
   const beginTouch = async (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.pointerType === "mouse" && event.button !== 0) {
-      return;
-    }
+    if (event.pointerType === "mouse" && event.button !== 0) return;
 
     const surface = surfaceRef.current;
-    if (!surface) {
+    if (!surface) return;
+
+    const bounds = surface.getBoundingClientRect();
+    const { sx: screenNormX, sy: screenNormY } = getScreenNorm(event, bounds);
+    const screenX = event.clientX - bounds.left;
+    const screenY = event.clientY - bounds.top;
+    const mode = gestureModeRef.current;
+
+    // ---- idle → motif-drag or musical ----
+    if (mode.kind === "idle") {
+      const motifHit = getMotifHit(screenX, screenY);
+      if (motifHit) {
+        surface.setPointerCapture(event.pointerId);
+        motifDragRef.current = {
+          pointerId: event.pointerId,
+          motifId: motifHit.motifId,
+          homeScopeId: motifHit.scopeId,
+          anchorAngle: motifHit.angle,
+          startScreenX: screenX,
+          startScreenY: screenY,
+          currentWorldX: motifHit.worldX,
+          currentWorldY: motifHit.worldY,
+          currentScreenX: screenX,
+          currentScreenY: screenY,
+          dragging: false,
+        };
+        gestureModeRef.current = { kind: "motif-drag", pointerId: event.pointerId };
+        lastInteractionAtRef.current = performance.now();
+        return;
+      }
+
+      // Start a single-finger musical gesture
+      surface.setPointerCapture(event.pointerId);
+      await ensureAudio();
+
+      const now = performance.now();
+      const pointValue = makeSurfacePoint(event, surface, now, cameraRef.current);
+      const previewScope = findScopeAt(pointValue.x, pointValue.y, scopesRef.current);
+      const { harmonic: previewHarmonic } = resolveEffectiveScopeContext(
+        previewScope?.id ?? null,
+        scopesRef.current,
+        harmonicStateRef.current,
+        sceneNameRef.current,
+      );
+      const previewRole =
+        nextRoleOverrideRef.current === "auto" ? null : nextRoleOverrideRef.current;
+      const hue = previewRole
+        ? getLoopHue(previewRole)
+        : chooseHue(pointValue, simulationRef.current.loops.length);
+
+      simulationRef.current.activeTouches.set(event.pointerId, {
+        pointerId: event.pointerId,
+        bornAt: now,
+        lastSampleAt: now,
+        hue,
+        previewRole,
+        points: [pointValue],
+        travel: 0,
+      });
+      gestureModeRef.current = { kind: "musical", pointerId: event.pointerId };
+      lastInteractionAtRef.current = now;
+      syncActiveCount();
+      pushFlash(pointValue, previewRole ?? "lead", hue, 0.62, "touch");
+      playMelodicTone({
+        midi: getPreviewMidi(pointValue, now, previewRole, previewHarmonic),
+        hue,
+        accent: 0.44,
+        durationMs: getBeatMs(previewHarmonic) * 0.34,
+        voice: previewRole ?? "touch",
+      });
       return;
     }
 
-    const bounds = surface.getBoundingClientRect();
-    const screenX = event.clientX - bounds.left;
-    const screenY = event.clientY - bounds.top;
-    const motifHit = getMotifHit(screenX, screenY);
-    if (motifHit) {
+    // ---- musical + second finger → discard musical gesture, enter camera ----
+    if (mode.kind === "musical") {
+      const cam = cameraRef.current;
+      // Recover first finger's last screen-normalised position from its stored world coord
+      const firstTouch = simulationRef.current.activeTouches.get(mode.pointerId);
+      let s0x = 0.5;
+      let s0y = 0.5;
+      if (firstTouch && firstTouch.points.length > 0) {
+        const lp = firstTouch.points[firstTouch.points.length - 1];
+        // Invert the camera transform: screenNorm = (worldX - viewCx) * zoom + 0.5
+        s0x = clamp((lp.x - cam.viewCx) * cam.zoom + 0.5, 0, 1);
+        s0y = clamp((lp.y - cam.viewCy) * cam.zoom + 0.5, 0, 1);
+      }
+
+      // Discard the musical gesture — do NOT call finalizeTouch (no voice should emit)
+      simulationRef.current.activeTouches.delete(mode.pointerId);
+      syncActiveCount();
+      // Keep pointer capture on id0 so its move/up events still arrive
+
       surface.setPointerCapture(event.pointerId);
-      motifDragRef.current = {
-        pointerId: event.pointerId,
-        motifId: motifHit.motifId,
-        homeScopeId: motifHit.scopeId,
-        anchorAngle: motifHit.angle,
-        startScreenX: screenX,
-        startScreenY: screenY,
-        currentWorldX: motifHit.worldX,
-        currentWorldY: motifHit.worldY,
-        currentScreenX: screenX,
-        currentScreenY: screenY,
-        dragging: false,
-      };
+      beginCameraMode(mode.pointerId, s0x, s0y, event.pointerId, screenNormX, screenNormY);
       lastInteractionAtRef.current = performance.now();
       return;
     }
 
-    surface.setPointerCapture(event.pointerId);
-    await ensureAudio();
-
-    const now = performance.now();
-    const pointValue = makeSurfacePoint(event, surface, now, cameraRef.current);
-    const previewScope = findScopeAt(pointValue.x, pointValue.y, scopesRef.current);
-    const { harmonic: previewHarmonic } = resolveEffectiveScopeContext(
-      previewScope?.id ?? null,
-      scopesRef.current,
-      harmonicStateRef.current,
-      sceneNameRef.current,
-    );
-    const previewRole =
-      nextRoleOverrideRef.current === "auto" ? null : nextRoleOverrideRef.current;
-    const hue = previewRole
-      ? getLoopHue(previewRole)
-      : chooseHue(pointValue, simulationRef.current.loops.length);
-
-    simulationRef.current.activeTouches.set(event.pointerId, {
-      pointerId: event.pointerId,
-      bornAt: now,
-      lastSampleAt: now,
-      hue,
-      previewRole,
-      points: [pointValue],
-      travel: 0,
-      isPinch: false,
-    });
-    lastInteractionAtRef.current = now;
-    syncActiveCount();
-    pushFlash(pointValue, previewRole ?? "lead", hue, 0.62, "touch");
-    playMelodicTone({
-      midi: getPreviewMidi(pointValue, now, previewRole, previewHarmonic),
-      hue,
-      accent: 0.44,
-      durationMs: getBeatMs(previewHarmonic) * 0.34,
-      voice: previewRole ?? "touch",
-    });
+    // All other modes (camera, motif-drag): ignore additional fingers
   };
 
   const moveTouch = (event: ReactPointerEvent<HTMLDivElement>) => {
     const surface = surfaceRef.current;
-    if (!surface) {
-      return;
-    }
+    if (!surface) return;
 
-    const motifDrag = motifDragRef.current;
-    if (motifDrag?.pointerId === event.pointerId) {
-      const bounds = surface.getBoundingClientRect();
-      const screenNormX = (event.clientX - bounds.left) / bounds.width;
-      const screenNormY = (event.clientY - bounds.top) / bounds.height;
+    const bounds = surface.getBoundingClientRect();
+    const mode = gestureModeRef.current;
+
+    // ---- motif-drag ----
+    if (mode.kind === "motif-drag" && mode.pointerId === event.pointerId) {
+      const motifDrag = motifDragRef.current;
+      if (!motifDrag) return;
+      const { sx: screenNormX, sy: screenNormY } = getScreenNorm(event, bounds);
       const [worldX, worldY] = screenToWorld(screenNormX, screenNormY, cameraRef.current);
       const screenX = event.clientX - bounds.left;
       const screenY = event.clientY - bounds.top;
@@ -3021,156 +3124,185 @@ export function EchoSurface({
       return;
     }
 
-    const touch = simulationRef.current.activeTouches.get(event.pointerId);
-    if (!touch) {
-      return;
-    }
+    // ---- musical (single-finger) ----
+    if (mode.kind === "musical" && mode.pointerId === event.pointerId) {
+      const touch = simulationRef.current.activeTouches.get(event.pointerId);
+      if (!touch) return;
 
-    const now = performance.now();
-    const pointValue = makeSurfacePoint(event, surface, now, cameraRef.current);
+      const now = performance.now();
+      const pointValue = makeSurfacePoint(event, surface, now, cameraRef.current);
+      const lastPoint = touch.points.at(-1);
 
-    // ---- Pinch / two-finger zoom detection ----
-    const allTouches = Array.from(simulationRef.current.activeTouches.values());
-    if (allTouches.length >= 2) {
-      const other = allTouches.find((t) => t.pointerId !== event.pointerId);
-      if (other && other.points.length > 0) {
-        const otherPos = other.points[other.points.length - 1];
-        const currentDist = distance(pointValue, otherPos);
-        const pinch = pinchRef.current;
-
-        if (!pinch) {
-          // Initialise pinch on first two-touch move
-          pinchRef.current = {
-            id0: event.pointerId,
-            id1: other.pointerId,
-            lastDist: currentDist,
-            lastMidX: (pointValue.x + otherPos.x) * 0.5,
-            lastMidY: (pointValue.y + otherPos.y) * 0.5,
-          };
-          // Mark both as pinch participants so finalizeTouch skips them
-          touch.isPinch = true;
-          other.isPinch = true;
-        } else {
-          const distDelta = currentDist - pinch.lastDist;
-          const cam = cameraRef.current;
-          const zoomFactor = 1 + distDelta * 3.2;
-          cam.targetZoom = clamp(cam.targetZoom * zoomFactor, 1, SCOPE_MAX_ZOOM);
-
-          // Pan toward pinch midpoint
-          const midX = (pointValue.x + otherPos.x) * 0.5;
-          const midY = (pointValue.y + otherPos.y) * 0.5;
-          const worldMid = screenToWorld(midX, midY, cam);
-          cam.targetViewCx = clamp(
-            cam.targetViewCx + (cam.viewCx - worldMid[0]) * 0.04,
-            0.1, 0.9,
-          );
-          cam.targetViewCy = clamp(
-            cam.targetViewCy + (cam.viewCy - worldMid[1]) * 0.04,
-            0.1, 0.9,
-          );
-
-          // When zoom returns near 1 while inside a scope, trigger exitScope
-          if (cam.targetZoom < 1.12 && cam.focusScopeId !== null) {
-            exitScope();
-          }
-          // When significantly zoomed in and a scope is nearby, enter it
-          if (distDelta < -0.018 && cam.focusScopeId === null) {
-            const worldCenter = screenToWorld(0.5, 0.5, cam);
-            const nearest = findScopeAt(worldCenter[0], worldCenter[1], scopesRef.current);
-            if (nearest) enterScope(nearest.id);
-          }
-
-          pinch.lastDist = currentDist;
-          pinch.lastMidX = midX;
-          pinch.lastMidY = midY;
-          return; // don't record points for gesture while pinching
-        }
+      if (!lastPoint) {
+        touch.points.push(pointValue);
+        return;
       }
-    } else if (pinchRef.current) {
-      pinchRef.current = null;
-    }
 
-    if (touch.isPinch) return;
-    // ---- end pinch ----
+      const gap = distance(lastPoint, pointValue);
+      if (gap < 0.003 && now - touch.lastSampleAt < 16) return;
 
-    const lastPoint = touch.points.at(-1);
-    if (!lastPoint) {
+      touch.travel += gap;
+      touch.lastSampleAt = now;
       touch.points.push(pointValue);
+      if (touch.points.length > MAX_POINTS_PER_GESTURE) {
+        touch.points.shift();
+      }
+      lastInteractionAtRef.current = now;
       return;
     }
 
-    const gap = distance(lastPoint, pointValue);
-    if (gap < 0.003 && now - touch.lastSampleAt < 16) {
-      return;
-    }
+    // ---- camera (two-finger pinch/pan) ----
+    if (mode.kind === "camera") {
+      const isFirst = event.pointerId === mode.id0;
+      const isSecond = event.pointerId === mode.id1;
+      if (!isFirst && !isSecond) return;
 
-    touch.travel += gap;
-    touch.lastSampleAt = now;
-    touch.points.push(pointValue);
-    if (touch.points.length > MAX_POINTS_PER_GESTURE) {
-      touch.points.shift();
-    }
+      const { sx, sy } = getScreenNorm(event, bounds);
 
-    lastInteractionAtRef.current = now;
+      // Update the moving finger's screen position in the mode record
+      const updated: GestureMode =
+        isFirst
+          ? { ...mode, screen0X: sx, screen0Y: sy }
+          : { ...mode, screen1X: sx, screen1Y: sy };
+      gestureModeRef.current = updated;
+      const cam = updated as Extract<GestureMode, { kind: "camera" }>;
+
+      // ---- Zoom: absolute ratio from pinch-start distance (no delta drift) ----
+      const currentDist = Math.hypot(
+        cam.screen1X - cam.screen0X,
+        cam.screen1Y - cam.screen0Y,
+      );
+      const newZoom = clamp(
+        cam.initialZoom * (currentDist / cam.initialDist),
+        1,
+        SCOPE_MAX_ZOOM,
+      );
+
+      // ---- Pan + anchor lock ----
+      // Keep the anchor world-point exactly under the live centroid.
+      // Formula: viewCx = anchorWorld - (centroidScreen - 0.5) / newZoom
+      const midX = (cam.screen0X + cam.screen1X) * 0.5;
+      const midY = (cam.screen0Y + cam.screen1Y) * 0.5;
+      const camera = cameraRef.current;
+      camera.targetZoom = newZoom;
+      camera.targetViewCx = clamp(cam.anchorWorldX - (midX - 0.5) / newZoom, 0.05, 0.95);
+      camera.targetViewCy = clamp(cam.anchorWorldY - (midY - 0.5) / newZoom, 0.05, 0.95);
+
+      // ---- Scope enter / exit ----
+      if (newZoom < 1.12 && camera.focusScopeId !== null) {
+        exitScope();
+      } else if (newZoom > 1.4 && camera.focusScopeId === null) {
+        // The anchor world point is always under the centroid — use it to find nearby scope
+        const nearest = findScopeAt(cam.anchorWorldX, cam.anchorWorldY, scopesRef.current);
+        if (nearest) enterScope(nearest.id);
+      }
+
+      lastInteractionAtRef.current = performance.now();
+    }
+  };
+
+  const releaseCapture = (surface: HTMLDivElement, pointerId: number) => {
+    if (surface.hasPointerCapture(pointerId)) {
+      surface.releasePointerCapture(pointerId);
+    }
   };
 
   const endTouch = (event: ReactPointerEvent<HTMLDivElement>) => {
-    const drag = motifDragRef.current;
-    if (drag?.pointerId === event.pointerId) {
-      const homeScope =
-        drag.homeScopeId === null
-          ? null
-          : scopesRef.current.find((scope) => scope.id === drag.homeScopeId) ?? null;
-      const releaseScope = findScopeAt(
-        drag.currentWorldX,
-        drag.currentWorldY,
-        scopesRef.current,
-      );
-      const targetScope = drag.dragging ? releaseScope : homeScope;
-      const center = drag.dragging
-        ? { x: drag.currentWorldX, y: drag.currentWorldY }
-        : targetScope
-          ? {
-              x: targetScope.cx + Math.cos(drag.anchorAngle) * targetScope.rx * 0.34,
-              y: targetScope.cy + Math.sin(drag.anchorAngle) * targetScope.ry * 0.34,
-            }
-          : {
-              x: 0.5 + Math.cos(drag.anchorAngle) * 0.12,
-              y: 0.5 + Math.sin(drag.anchorAngle) * 0.12,
-            };
-      motifDragRef.current = null;
-      void awakenMotif({
-        motifId: drag.motifId,
-        targetScopeId: targetScope?.id ?? null,
-        center,
-      });
+    const surface = surfaceRef.current;
+    if (!surface) return;
 
-      if (surfaceRef.current?.hasPointerCapture(event.pointerId)) {
-        surfaceRef.current.releasePointerCapture(event.pointerId);
+    const mode = gestureModeRef.current;
+
+    // ---- motif-drag ends ----
+    if (mode.kind === "motif-drag" && mode.pointerId === event.pointerId) {
+      const drag = motifDragRef.current;
+      if (drag) {
+        const homeScope =
+          drag.homeScopeId === null
+            ? null
+            : scopesRef.current.find((scope) => scope.id === drag.homeScopeId) ?? null;
+        const releaseScope = findScopeAt(
+          drag.currentWorldX,
+          drag.currentWorldY,
+          scopesRef.current,
+        );
+        const targetScope = drag.dragging ? releaseScope : homeScope;
+        const center = drag.dragging
+          ? { x: drag.currentWorldX, y: drag.currentWorldY }
+          : targetScope
+            ? {
+                x: targetScope.cx + Math.cos(drag.anchorAngle) * targetScope.rx * 0.34,
+                y: targetScope.cy + Math.sin(drag.anchorAngle) * targetScope.ry * 0.34,
+              }
+            : {
+                x: 0.5 + Math.cos(drag.anchorAngle) * 0.12,
+                y: 0.5 + Math.sin(drag.anchorAngle) * 0.12,
+              };
+        motifDragRef.current = null;
+        void awakenMotif({
+          motifId: drag.motifId,
+          targetScopeId: targetScope?.id ?? null,
+          center,
+        });
       }
+      gestureModeRef.current = { kind: "idle" };
+      releaseCapture(surface, event.pointerId);
       return;
     }
 
-    finalizeTouch(event.pointerId);
+    // ---- musical gesture ends → finalize into voice ----
+    if (mode.kind === "musical" && mode.pointerId === event.pointerId) {
+      finalizeTouch(event.pointerId);
+      gestureModeRef.current = { kind: "idle" };
+      releaseCapture(surface, event.pointerId);
+      return;
+    }
 
-    if (surfaceRef.current?.hasPointerCapture(event.pointerId)) {
-      surfaceRef.current.releasePointerCapture(event.pointerId);
+    // ---- camera: either finger lifting ends the gesture ----
+    if (
+      mode.kind === "camera" &&
+      (event.pointerId === mode.id0 || event.pointerId === mode.id1)
+    ) {
+      // Release both captures; the non-lifting finger's pointerUp will arrive next
+      // and be gracefully ignored since we're already idle.
+      releaseCapture(surface, mode.id0);
+      releaseCapture(surface, mode.id1);
+      gestureModeRef.current = { kind: "idle" };
+      lastInteractionAtRef.current = performance.now();
+      return;
     }
   };
 
   const cancelTouch = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (motifDragRef.current?.pointerId === event.pointerId) {
+    const surface = surfaceRef.current;
+    if (!surface) return;
+
+    const mode = gestureModeRef.current;
+
+    if (mode.kind === "motif-drag" && mode.pointerId === event.pointerId) {
       motifDragRef.current = null;
-      if (surfaceRef.current?.hasPointerCapture(event.pointerId)) {
-        surfaceRef.current.releasePointerCapture(event.pointerId);
-      }
+      gestureModeRef.current = { kind: "idle" };
+      releaseCapture(surface, event.pointerId);
       return;
     }
 
-    finalizeTouch(event.pointerId);
+    if (mode.kind === "musical" && mode.pointerId === event.pointerId) {
+      // On cancel, discard the gesture (don't create a voice from a cancelled touch)
+      simulationRef.current.activeTouches.delete(event.pointerId);
+      syncActiveCount();
+      gestureModeRef.current = { kind: "idle" };
+      releaseCapture(surface, event.pointerId);
+      return;
+    }
 
-    if (surfaceRef.current?.hasPointerCapture(event.pointerId)) {
-      surfaceRef.current.releasePointerCapture(event.pointerId);
+    if (
+      mode.kind === "camera" &&
+      (event.pointerId === mode.id0 || event.pointerId === mode.id1)
+    ) {
+      releaseCapture(surface, mode.id0);
+      releaseCapture(surface, mode.id1);
+      gestureModeRef.current = { kind: "idle" };
+      return;
     }
   };
 
@@ -3184,21 +3316,28 @@ export function EchoSurface({
     const screenNormX = (event.clientX - bounds.left) / bounds.width;
     const screenNormY = (event.clientY - bounds.top) / bounds.height;
 
-    // Zoom around cursor position
+    // Compute zoom using TARGET values so rapid wheel events accumulate correctly
+    // without drifting against the lerp-lagged actual zoom.
     const zoomDelta = event.deltaY < 0 ? 1.12 : 0.9;
     const newZoom = clamp(cam.targetZoom * zoomDelta, 1, SCOPE_MAX_ZOOM);
 
-    // Keep cursor world-position stable: viewCx adjusts so cursor stays
-    const [worldX, worldY] = screenToWorld(screenNormX, screenNormY, cam);
-    cam.targetViewCx = clamp(worldX - (screenNormX - 0.5) / newZoom, 0.05, 0.95);
-    cam.targetViewCy = clamp(worldY - (screenNormY - 0.5) / newZoom, 0.05, 0.95);
+    // Anchor: the world point under the cursor must remain fixed after zoom.
+    // Use TARGET view state as the reference so consecutive fast wheel events
+    // chain correctly (each event anchors from the previous event's target, not
+    // from the still-lerping actual camera).
+    //   anchorWorld = (screenNorm - 0.5) / targetZoom + targetViewCx
+    //   newTargetViewCx = anchorWorld - (screenNorm - 0.5) / newZoom  ← rearranged
+    const anchorWorldX = (screenNormX - 0.5) / cam.targetZoom + cam.targetViewCx;
+    const anchorWorldY = (screenNormY - 0.5) / cam.targetZoom + cam.targetViewCy;
+    cam.targetViewCx = clamp(anchorWorldX - (screenNormX - 0.5) / newZoom, 0.05, 0.95);
+    cam.targetViewCy = clamp(anchorWorldY - (screenNormY - 0.5) / newZoom, 0.05, 0.95);
     cam.targetZoom = newZoom;
 
     if (newZoom < 1.12 && cam.focusScopeId !== null) {
       exitScope();
     } else if (newZoom > 1.4 && cam.focusScopeId === null) {
-      const [wx, wy] = screenToWorld(0.5, 0.5, cam);
-      const nearest = findScopeAt(wx, wy, scopesRef.current);
+      // Use cursor world position for scope detection
+      const nearest = findScopeAt(anchorWorldX, anchorWorldY, scopesRef.current);
       if (nearest) enterScope(nearest.id);
     }
   };
@@ -3213,6 +3352,8 @@ export function EchoSurface({
     simulationRef.current.surfaceEnergy = 0.16;
     fusionCooldownRef.current.clear();
     motifDragRef.current = null;
+    gestureModeRef.current = { kind: "idle" };
+    pinchRef.current = null;
     lastInteractionAtRef.current = performance.now();
     syncMemory();
     syncActiveCount();
