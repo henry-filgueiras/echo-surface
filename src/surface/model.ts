@@ -707,6 +707,22 @@ export const POLYGON_RADIUS_REGULARITY_TOLERANCE = 0.44;
 // Minimum polygon radius in pixels — prevents tiny accidental shapes
 export const POLYGON_MIN_RADIUS_PX = 38;
 
+// ── Magnetic closure halo — auto-close when stroke enters the snap zone ───────
+// Radius of snap zone as fraction of min(w,h).
+// Touch devices get a much larger halo (finger has ~44px contact area).
+export const POLYGON_HALO_RADIUS_TOUCH = 0.10;
+export const POLYGON_HALO_RADIUS_MOUSE = 0.055;
+// Gesture must have traveled at least this far (fraction of min(w,h)) before
+// the halo activates — prevents accidental snap at the very start of drawing.
+export const POLYGON_HALO_MIN_TRAVEL_FRAC = 0.22;
+
+// ── Multi-fit polygon classification ──────────────────────────────────────────
+// Score threshold below which a candidate N-gon fit is rejected.
+export const POLYGON_FIT_MIN_SCORE = 0.18;
+// Square preference: if 4-gon score is within this fraction of 3-gon score, prefer 4.
+// Squares are harder to draw than triangles so we give them a forgiveness boost.
+export const POLYGON_SQUARE_PREFERENCE_MARGIN = 0.14;
+
 /** Maps polygon side count to a voice role */
 export const POLYGON_SIDE_ROLE: Record<number, VoiceRole> = {
   3: "percussion",   // triplet / 3-beat

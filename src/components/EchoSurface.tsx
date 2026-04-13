@@ -30,6 +30,9 @@ import {
   SCENE_EARLY_TRIGGER_MIN_GESTURES,
   SCENE_EARLY_TRIGGER_MIN_ROLES,
   SCENE_SEQUENCE,
+  POLYGON_HALO_MIN_TRAVEL_FRAC,
+  POLYGON_HALO_RADIUS_MOUSE,
+  POLYGON_HALO_RADIUS_TOUCH,
   POLYGON_MIN_DURATION_MS,
   POLYGON_SIDE_ROLE,
   SCOPE_GESTURE_CLOSE_THRESHOLD,
@@ -2895,6 +2898,60 @@ export function EchoSurface({
           context.arc(pixel.x, pixel.y, 5.4, 0, TAU);
           context.fill();
         }
+
+        // ── Magnetic closure halo — visible snap ring around the start point ─
+        // Draws once enough travel has accumulated and no role is pre-sealed.
+        if (!touch.previewRole && touch.points.length >= 6) {
+          const minDim = Math.min(size.width, size.height);
+          const travelSufficient =
+            touch.travel * minDim >= POLYGON_HALO_MIN_TRAVEL_FRAC * minDim;
+          if (travelSufficient) {
+            // Estimate pointer type from the gesture mode state — touch gets
+            // the larger radius.  We default to touch-sized when ambiguous.
+            const isMouseMode = gestureModeRef.current.kind !== "musical";
+            const haloFrac = isMouseMode
+              ? POLYGON_HALO_RADIUS_MOUSE
+              : POLYGON_HALO_RADIUS_TOUCH;
+            const haloR = haloFrac * minDim;
+
+            const firstPt = touch.points[0];
+            const firstPx = normalizedToPixels(firstPt, size);
+
+            // Pulsing breath animation at 1.8 Hz
+            const breathPhase = (now * 0.0018) % 1;
+            const breathScale = 0.85 + 0.15 * Math.sin(breathPhase * TAU);
+            const displayR = haloR * breathScale;
+
+            // Distance from current head to start point (in pixels)
+            const headPt = touch.points.at(-1)!;
+            const headDx = (headPt.x - firstPt.x) * size.width;
+            const headDy = (headPt.y - firstPt.y) * size.height;
+            const headDistPx = Math.hypot(headDx, headDy);
+            // Alpha ramps up as head approaches the halo
+            const proximity = clamp(1 - headDistPx / (haloR * 3), 0, 1);
+            const baseAlpha = 0.22 + proximity * 0.42;
+
+            context.save();
+            // Outer glow
+            context.shadowBlur = 10;
+            context.shadowColor = `hsla(${liveHue}, 86%, 76%, ${baseAlpha * 0.6})`;
+            context.beginPath();
+            context.arc(firstPx.x, firstPx.y, displayR, 0, TAU);
+            context.strokeStyle = `hsla(${liveHue}, 88%, 82%, ${baseAlpha})`;
+            context.lineWidth = 1.6;
+            context.setLineDash([6, 8]);
+            context.stroke();
+            context.setLineDash([]);
+            // Inner dot at start anchor
+            context.shadowBlur = 0;
+            context.beginPath();
+            context.arc(firstPx.x, firstPx.y, 3.8, 0, TAU);
+            context.fillStyle = `hsla(${liveHue}, 92%, 86%, ${baseAlpha * 1.2})`;
+            context.fill();
+            context.restore();
+          }
+        }
+        // ── end closure halo ─────────────────────────────────────────────────
       }
 
       // ================================================================
@@ -3570,6 +3627,45 @@ export function EchoSurface({
         touch.points.shift();
       }
       lastInteractionAtRef.current = now;
+
+      // ── Magnetic closure halo — auto-close when stroke nears the start ──────
+      // Only activates once enough travel has accumulated to rule out short
+      // gestures.  Pointer type determines the halo radius: touch gets a much
+      // larger snap zone than mouse/pen.
+      if (
+        touch.points.length >= 6 &&
+        !touch.previewRole &&
+        now - touch.bornAt >= POLYGON_MIN_DURATION_MS
+      ) {
+        const minDim = Math.min(sizeRef.current.width, sizeRef.current.height);
+        const haloFrac =
+          event.pointerType === "touch"
+            ? POLYGON_HALO_RADIUS_TOUCH
+            : POLYGON_HALO_RADIUS_MOUSE;
+        const haloDistNorm = haloFrac * minDim
+          / Math.max(sizeRef.current.width, sizeRef.current.height);
+
+        const firstPt = touch.points[0];
+        const travelSufficient =
+          touch.travel * Math.min(sizeRef.current.width, sizeRef.current.height)
+          >= POLYGON_HALO_MIN_TRAVEL_FRAC * minDim;
+
+        if (
+          travelSufficient &&
+          distance(pointValue, firstPt) <= haloDistNorm
+        ) {
+          // Snap the last point to the first point for clean closure, then
+          // trigger finalizeTouch so detectPolygon runs on the closed path.
+          touch.points[touch.points.length - 1] = { ...firstPt, t: pointValue.t };
+          finalizeTouch(event.pointerId);
+          gestureModeRef.current = { kind: "idle" };
+          if (surface.hasPointerCapture(event.pointerId)) {
+            surface.releasePointerCapture(event.pointerId);
+          }
+          return;
+        }
+      }
+      // ── end magnetic closure ─────────────────────────────────────────────────
       return;
     }
 

@@ -207,6 +207,22 @@ The principle is:
 
 `phrases near each other may rhyme in time, but they should not snap into sameness`
 
+### Phase 14.5: Polygon Snap Refinement — Touch-Friendly Classification
+
+Three targeted fixes for the polygon snap system:
+
+**1. Magnetic closure halo.** Once a gesture has traveled far enough to be a polygon candidate, a pulsing dashed ring appears around the start point. The ring breathes at 1.8 Hz and grows brighter as the finger approaches it. On touch devices the snap radius is `10%` of the short dimension — roughly 80–90px on a 9-inch iPad. On mouse/pen it's `5.5%`. When the stroke enters the halo, the gesture is auto-closed (last point snapped to first point) and `finalizeTouch` is called immediately, so the user doesn't need to precisely land on the origin.
+
+**2. Confidence-based multi-fit classifier.** The original detector found N peaks, got one cluster count, then pass/failed a single N-gon. The new `fitNGon` helper partitions the resampled path into N equal windows and picks the sharpest corner in each, so a weak or merged corner (common in rough squares) is still represented. Each candidate N ∈ {3, 4, 5, 6} is scored independently on four axes: radius uniformity, angular uniformity, edge-length uniformity, and average corner sharpness normalised by the ideal interior angle for that N. All valid fits are collected and sorted; the highest-scoring N wins.
+
+**3. Square preference heuristic.** When the highest-scoring fit is a triangle (N=3) but a square fit (N=4) scores within 14% of it, the square is chosen instead. Rationale: a right-angle corner is harder to draw cleanly than an equilateral corner, so squares that are drawn "well enough" were being mis-classified as triangles whenever one corner was slightly merged. This makes square drawing feel forgiving on iPad without inflating false positives for genuine triangles.
+
+**Constants added to model.ts:**
+- `POLYGON_HALO_RADIUS_TOUCH` (0.10), `POLYGON_HALO_RADIUS_MOUSE` (0.055)
+- `POLYGON_HALO_MIN_TRAVEL_FRAC` (0.22)
+- `POLYGON_FIT_MIN_SCORE` (0.18)
+- `POLYGON_SQUARE_PREFERENCE_MARGIN` (0.14)
+
 ### Phase 14: Resonance Filaments — Phase Binding Between Polygon Loops
 
 Canonical polygon loops can now be bound together into **polyrhythmic ecosystems** through resonance filaments.

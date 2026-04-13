@@ -5,11 +5,13 @@ import {
   POLYGON_CLOSURE_THRESHOLD,
   POLYGON_CLUSTER_DISTANCE_FRAC,
   POLYGON_CURVATURE_WINDOW,
+  POLYGON_FIT_MIN_SCORE,
   POLYGON_MIN_CORNER_ANGLE_RAD,
   POLYGON_MIN_RADIUS_PX,
   POLYGON_MIN_TRAVEL,
   POLYGON_RADIUS_REGULARITY_TOLERANCE,
   POLYGON_RESAMPLE_COUNT,
+  POLYGON_SQUARE_PREFERENCE_MARGIN,
   RESPONSE_ROLE_MAP,
   TAU,
   type CameraState,
@@ -459,7 +461,7 @@ export const makeSurfacePoint = (
 };
 
 // ---------------------------------------------------------------------------
-// Polygon gesture detection helpers
+// Polygon gesture detection — confidence-based multi-fit classifier
 // ---------------------------------------------------------------------------
 
 /** Resample path to uniform spatial distance in pixel space. */
@@ -511,21 +513,143 @@ const spatialResamplePoints = (
   return result;
 };
 
+// ── Per-N fit result (internal) ────────────────────────────────────────────────
+type NGonFit = {
+  sides: number;
+  score: number;
+  cx: number;   // normalised world
+  cy: number;
+  rFraction: number;
+  rotation: number;
+};
+
 /**
- * Attempt to detect a regular polygon in a closed freehand path.
+ * Fit an exact N-gon to the curvature signal by partitioning the resampled
+ * path into N equal windows and picking the sharpest corner in each window.
  *
- * Returns a PolygonSpec if the gesture looks like a 3-6 sided regular polygon,
- * or null if it does not qualify.
+ * Returns a scored fit, or null if the fit fails hard constraints.
  *
- * The algorithm:
- *   1. Verify closure (first ↔ last in pixel space)
+ * Score is in [0, 1]: higher is better.  It combines:
+ *   • radius uniformity    (vertices equidistant from centroid)
+ *   • angular uniformity   (vertices evenly spread around centroid)
+ *   • edge-length uniformity
+ *   • average corner sharpness normalised by the ideal angle for this N
+ */
+const fitNGon = (
+  pts: NormalizedPoint[],
+  curvatures: number[],
+  N: number,
+  W: number,
+  H: number,
+): NGonFit | null => {
+  const M = pts.length;
+  const minDim = Math.min(W, H);
+
+  // Find best corner in each of N equal windows of the path
+  const vertexIndices: number[] = [];
+  for (let seg = 0; seg < N; seg++) {
+    const start = Math.floor((seg * M) / N);
+    const end = Math.floor(((seg + 1) * M) / N);
+    let bestIdx = start;
+    let bestVal = curvatures[start] ?? 0;
+    for (let i = start + 1; i < end; i++) {
+      if ((curvatures[i] ?? 0) > bestVal) {
+        bestVal = curvatures[i];
+        bestIdx = i;
+      }
+    }
+    vertexIndices.push(bestIdx);
+  }
+
+  // Average corner sharpness (normalised: ideal interior angle for N-gon)
+  const idealInteriorAngle = Math.PI - TAU / N; // π - 2π/N
+  let avgSharpness = 0;
+  for (const idx of vertexIndices) {
+    avgSharpness += Math.min((curvatures[idx] ?? 0) / Math.max(idealInteriorAngle, 0.01), 1.5);
+  }
+  avgSharpness /= N;
+
+  // Pixel-space vertices
+  const pxVerts = vertexIndices.map((i) => ({
+    x: pts[i].x * W,
+    y: pts[i].y * H,
+  }));
+
+  // Centroid
+  const pxCx = pxVerts.reduce((s, v) => s + v.x, 0) / N;
+  const pxCy = pxVerts.reduce((s, v) => s + v.y, 0) / N;
+
+  const pxRadii = pxVerts.map((v) => Math.hypot(v.x - pxCx, v.y - pxCy));
+  const avgPxR = pxRadii.reduce((s, r) => s + r, 0) / N;
+
+  if (avgPxR < POLYGON_MIN_RADIUS_PX) return null;
+
+  // ── Radius uniformity ──────────────────────────────────────────────────────
+  const radiusCV = Math.sqrt(
+    pxRadii.reduce((s, r) => s + (r - avgPxR) ** 2, 0) / N,
+  ) / (avgPxR || 1);
+  if (radiusCV > POLYGON_RADIUS_REGULARITY_TOLERANCE) return null;
+
+  // ── Angular uniformity ─────────────────────────────────────────────────────
+  const angles = pxVerts
+    .map((v) => Math.atan2(v.y - pxCy, v.x - pxCx))
+    .sort((a, b) => a - b);
+  const expectedSpacing = TAU / N;
+  let maxAngleErr = 0;
+  let sumAngleErrSq = 0;
+  for (let i = 0; i < N; i++) {
+    const nextAngle = i < N - 1 ? angles[i + 1] : angles[0] + TAU;
+    const err = Math.abs(nextAngle - angles[i] - expectedSpacing);
+    maxAngleErr = Math.max(maxAngleErr, err);
+    sumAngleErrSq += err * err;
+  }
+  if (maxAngleErr > expectedSpacing * POLYGON_ANGLE_REGULARITY_TOLERANCE) return null;
+  const angularCV = Math.sqrt(sumAngleErrSq / N) / expectedSpacing;
+
+  // ── Edge-length uniformity ─────────────────────────────────────────────────
+  const edges: number[] = [];
+  for (let i = 0; i < N; i++) {
+    const a = pxVerts[i];
+    const b = pxVerts[(i + 1) % N];
+    edges.push(Math.hypot(b.x - a.x, b.y - a.y));
+  }
+  const avgEdge = edges.reduce((s, e) => s + e, 0) / N;
+  const edgeCV = Math.sqrt(
+    edges.reduce((s, e) => s + (e - avgEdge) ** 2, 0) / N,
+  ) / (avgEdge || 1);
+
+  // ── Composite score (higher = better fit) ─────────────────────────────────
+  // Each term is a penalty in [0,1]; we subtract from 1.
+  const score =
+    avgSharpness * 0.30
+    - radiusCV  * 0.30
+    - angularCV * 0.25
+    - edgeCV    * 0.15;
+
+  return {
+    sides: N,
+    score,
+    cx: pxCx / W,
+    cy: pxCy / H,
+    rFraction: avgPxR / minDim,
+    rotation: angles[0],
+  };
+};
+
+/**
+ * Detect a regular polygon in a closed freehand path.
+ *
+ * Algorithm (replaces original single-pass peak-cluster approach):
+ *
+ *   1. Verify closure + travel (unchanged gate)
  *   2. Resample to uniform spatial spacing
- *   3. Measure turning-angle at each sample (curvature)
- *   4. Find local curvature peaks → corner candidates
- *   5. Cluster nearby peaks → N vertices
- *   6. Reject if N ∉ {3, 4, 5, 6}
- *   7. Check radius and angular regularity
- *   8. Return canonical PolygonSpec
+ *   3. Compute turning-angle curvature at each sample
+ *   4. For N ∈ {3, 4, 5, 6}: partition path into N windows, pick sharpest
+ *      corner in each, score the resulting N-gon fit
+ *   5. Apply square-preference heuristic: if 4-gon score is within a
+ *      margin of 3-gon score, prefer the 4-gon (squares are harder to
+ *      draw cleanly on touch surfaces so they need extra forgiveness)
+ *   6. Return the highest-scoring valid fit, or null
  */
 export const detectPolygon = (
   rawPoints: NormalizedPoint[],
@@ -538,13 +662,14 @@ export const detectPolygon = (
   const H = surfaceHeight;
   const minDim = Math.min(W, H);
 
-  // 1. Check closure
+  // 1. Closure gate — auto-close may have already nudged the path, so use
+  //    a slightly relaxed threshold here (actual snapping adds the last vertex).
   const first = rawPoints[0];
   const last = rawPoints[rawPoints.length - 1];
   const closurePx = Math.hypot((first.x - last.x) * W, (first.y - last.y) * H);
   if (closurePx > POLYGON_CLOSURE_THRESHOLD * minDim) return null;
 
-  // Travel check
+  // Travel gate
   const travelPx = rawPoints
     .slice(1)
     .reduce(
@@ -554,14 +679,13 @@ export const detectPolygon = (
     );
   if (travelPx < POLYGON_MIN_TRAVEL * minDim) return null;
 
-  // 2. Spatially uniform resample (pixel space)
+  // 2. Spatially uniform resample
   const M = POLYGON_RESAMPLE_COUNT;
   const pts = spatialResamplePoints(rawPoints, M, W, H);
 
-  // 3. Turning angle at each sample
+  // 3. Curvature (turning angle) at each sample
   const WIN = POLYGON_CURVATURE_WINDOW;
   const curvatures: number[] = new Array(M).fill(0);
-
   for (let i = WIN; i < M - WIN; i++) {
     const prev = pts[i - WIN];
     const curr = pts[i];
@@ -572,91 +696,43 @@ export const detectPolygon = (
     const d2y = (next.y - curr.y) * H;
     const len1 = Math.hypot(d1x, d1y) || 0.001;
     const len2 = Math.hypot(d2x, d2y) || 0.001;
-    const cosAngle = clamp(
-      (d1x / len1) * (d2x / len2) + (d1y / len1) * (d2y / len2),
-      -1,
-      1,
+    curvatures[i] = Math.acos(
+      clamp((d1x / len1) * (d2x / len2) + (d1y / len1) * (d2y / len2), -1, 1),
     );
-    curvatures[i] = Math.acos(cosAngle);
   }
 
-  // 4. Local maxima above threshold
-  const peaks: number[] = [];
-  for (let i = 1; i < M - 1; i++) {
+  // 4 & 5. Fit each candidate N, collect valid fits
+  const candidates: NGonFit[] = [];
+  for (const N of [3, 4, 5, 6]) {
+    const fit = fitNGon(pts, curvatures, N, W, H);
+    if (fit && fit.score >= POLYGON_FIT_MIN_SCORE) {
+      candidates.push(fit);
+    }
+  }
+  if (candidates.length === 0) return null;
+
+  // Sort descending by score
+  candidates.sort((a, b) => b.score - a.score);
+
+  // 6. Square-preference heuristic: if best is triangle and a square fit
+  //    exists within margin, upgrade to the square.
+  let winner = candidates[0];
+  if (winner.sides === 3) {
+    const squareFit = candidates.find((c) => c.sides === 4);
     if (
-      curvatures[i] >= POLYGON_MIN_CORNER_ANGLE_RAD &&
-      curvatures[i] > curvatures[i - 1] &&
-      curvatures[i] > curvatures[i + 1]
+      squareFit &&
+      squareFit.score >= winner.score * (1 - POLYGON_SQUARE_PREFERENCE_MARGIN)
     ) {
-      peaks.push(i);
+      winner = squareFit;
     }
-  }
-  if (peaks.length < 3) return null;
-
-  // 5. Cluster nearby peaks
-  const clusterDist = Math.max(2, Math.round(M * POLYGON_CLUSTER_DISTANCE_FRAC));
-  const clusters: number[][] = [];
-  for (const peak of peaks) {
-    const existing = clusters.find(
-      (c) => peak - (c[c.length - 1] ?? 0) < clusterDist,
-    );
-    if (existing) {
-      existing.push(peak);
-    } else {
-      clusters.push([peak]);
-    }
-  }
-
-  const N = clusters.length;
-  if (N < 3 || N > 6) return null;
-
-  // 6. Representative vertex = sample with highest curvature in each cluster
-  const vertices = clusters.map((cluster) => {
-    const best = cluster.reduce((a, b) =>
-      curvatures[a] > curvatures[b] ? a : b,
-    );
-    return pts[best];
-  });
-
-  // 7. Centroid and radii in pixel space
-  const pxVerts = vertices.map((v) => ({ x: v.x * W, y: v.y * H }));
-  const pxCx = pxVerts.reduce((s, v) => s + v.x, 0) / N;
-  const pxCy = pxVerts.reduce((s, v) => s + v.y, 0) / N;
-  const pxRadii = pxVerts.map((v) => Math.hypot(v.x - pxCx, v.y - pxCy));
-  const avgPxR = pxRadii.reduce((s, r) => s + r, 0) / N;
-
-  if (avgPxR < POLYGON_MIN_RADIUS_PX) return null;
-
-  // Radius regularity
-  const radiusStd = Math.sqrt(
-    pxRadii.reduce((s, r) => s + (r - avgPxR) ** 2, 0) / N,
-  );
-  if (radiusStd / avgPxR > POLYGON_RADIUS_REGULARITY_TOLERANCE) return null;
-
-  // Angular regularity
-  const angles = pxVerts
-    .map((v) => Math.atan2(v.y - pxCy, v.x - pxCx))
-    .sort((a, b) => a - b);
-  const expectedSpacing = TAU / N;
-  let maxAngleError = 0;
-  for (let i = 0; i < N; i++) {
-    const nextAngle = i < N - 1 ? angles[i + 1] : angles[0] + TAU;
-    const spacing = nextAngle - angles[i];
-    maxAngleError = Math.max(
-      maxAngleError,
-      Math.abs(spacing - expectedSpacing),
-    );
-  }
-  if (maxAngleError > expectedSpacing * POLYGON_ANGLE_REGULARITY_TOLERANCE) {
-    return null;
   }
 
   return {
-    sides: N,
-    cx: pxCx / W,
-    cy: pxCy / H,
-    rFraction: avgPxR / minDim,
-    rotation: angles[0],
+    sides: winner.sides,
+    cx: winner.cx,
+    cy: winner.cy,
+    rFraction: winner.rFraction,
+    rotation: winner.rotation,
   };
 };
 
