@@ -1,5 +1,8 @@
 import {
   TAU,
+  TIDE_ATTACK_ZONE,
+  TIDE_MODULATION_ZONE,
+  TIDE_TRAVEL_MS,
   VOICE_ROLE_STYLES,
   type BindingMode,
   type ContourLoop,
@@ -10,6 +13,7 @@ import {
   type ResonanceFilament,
   type SceneName,
   type SurfaceSize,
+  type TideWave,
   type VoiceRole,
 } from "../surface/model";
 import { clamp, easeInOutSine, easeOutCubic, lerp } from "../surface/contour";
@@ -645,11 +649,18 @@ export const drawClockInfluenceHaloPx = (
   isDrawing: boolean,
   latchRadiusPx: number,
   now: number,
+  /** Optional tide modulation [0-1] — boosts halo brightness and dilates radius. */
+  tideMod: number = 0,
 ): void => {
   // ── Downbeat brightness — perimeter brightens at the start of each cycle ──
   // cycleProgress = 0 is the downbeat.  We use a sharp decay so only the
   // first ~10 % of the cycle gets the bright flash.
-  const downbeatFlash = Math.pow(Math.max(0, 1 - cycleProgress / 0.12), 2.2);
+  const rawDownbeatFlash = Math.pow(Math.max(0, 1 - cycleProgress / 0.12), 2.2);
+  // Tide boosts the downbeat flash and keeps it elevated through its trail
+  const downbeatFlash = rawDownbeatFlash + tideMod * 0.55;
+
+  // ── Tide dilation — halo radius expands slightly when a wave passes ─────────
+  const tidalLatchRadius = latchRadiusPx * (1 + tideMod * 0.10);
 
   // ── Slow breath — makes the field feel alive between downbeats ─────────────
   // Each beacon gets a unique phase via sides-based seed so they don't pulse
@@ -663,48 +674,54 @@ export const drawClockInfluenceHaloPx = (
   const dimFactor      = isDrawing && !isNearest ? 0.42 : 1.0;
 
   // ── Interior radial glow (very faint wash that fills the field) ───────────
-  const glowAlpha = (0.038 + downbeatFlash * 0.05 + breathMod * 0.012 + proximityBoost * 0.04) * dimFactor;
+  const glowAlpha = (
+    0.038 + downbeatFlash * 0.05 + breathMod * 0.012 +
+    proximityBoost * 0.04 + tideMod * 0.05
+  ) * dimFactor;
   if (glowAlpha > 0.005) {
     ctx.save();
-    const innerGrad = ctx.createRadialGradient(pxCx, pxCy, 0, pxCx, pxCy, latchRadiusPx);
+    const innerGrad = ctx.createRadialGradient(pxCx, pxCy, 0, pxCx, pxCy, tidalLatchRadius);
     innerGrad.addColorStop(0.0,  `hsla(${hue}, 72%, 72%, ${glowAlpha * 0.55})`);
     innerGrad.addColorStop(0.55, `hsla(${hue}, 68%, 66%, ${glowAlpha * 0.28})`);
     innerGrad.addColorStop(1.0,  `hsla(${hue}, 62%, 60%, 0)`);
     ctx.fillStyle = glowAlpha > 0.005 ? innerGrad : "transparent";
     ctx.beginPath();
-    ctx.arc(pxCx, pxCy, latchRadiusPx, 0, TAU);
+    ctx.arc(pxCx, pxCy, tidalLatchRadius, 0, TAU);
     ctx.fill();
     ctx.restore();
   }
 
   // ── Perimeter ring ──────────────────────────────────────────────────────────
-  // Base opacity is very low; it lifts on downbeat and proximity entry.
-  const ringBaseAlpha = 0.08 + breathMod * 0.05;
+  // Base opacity is very low; it lifts on downbeat, proximity entry, and tide.
+  const ringBaseAlpha = 0.08 + breathMod * 0.05 + tideMod * 0.18;
   const ringAlpha     = (ringBaseAlpha + downbeatFlash * 0.44 + proximityBoost * 0.52) * dimFactor;
-  const ringWidth     = ((isNearest && isDrawing ? 1.6 : 1.1) + downbeatFlash * 1.2) / zoom;
+  const ringWidth     = (
+    (isNearest && isDrawing ? 1.6 : 1.1) + downbeatFlash * 1.2 + tideMod * 0.8
+  ) / zoom;
 
   if (ringAlpha > 0.01) {
     ctx.save();
     ctx.globalAlpha  = clamp(ringAlpha, 0, 1);
     ctx.lineWidth    = ringWidth;
-    ctx.shadowBlur   = (isNearest && isDrawing ? 18 : 8 + downbeatFlash * 14) / zoom;
-    ctx.shadowColor  = `hsla(${hue}, 88%, 78%, ${0.5 + downbeatFlash * 0.45})`;
-    ctx.strokeStyle  = `hsla(${hue}, ${72 + downbeatFlash * 18}%, ${68 + downbeatFlash * 14}%, 1)`;
+    ctx.shadowBlur   = (isNearest && isDrawing ? 18 : 8 + downbeatFlash * 14 + tideMod * 16) / zoom;
+    ctx.shadowColor  = `hsla(${hue}, 88%, 78%, ${0.5 + downbeatFlash * 0.45 + tideMod * 0.3})`;
+    ctx.strokeStyle  = `hsla(${hue}, ${72 + downbeatFlash * 18}%, ${68 + downbeatFlash * 14 + tideMod * 10}%, 1)`;
     // Subtle dashes — evenly matched so it feels like a frequency ring, not a UI dash
-    const dashLen = Math.max(6, latchRadiusPx * 0.13) / zoom;
+    const dashLen = Math.max(6, tidalLatchRadius * 0.13) / zoom;
     const gapLen  = dashLen * (1.6 - breathMod * 0.5);
     ctx.setLineDash([dashLen, gapLen]);
-    // Slow rotation — the ring drifts very gently around the beacon
-    ctx.lineDashOffset = -(now * 0.009 + sides * 22);
+    // Slow rotation — the ring drifts very gently around the beacon;
+    // tide briefly accelerates the rotation
+    ctx.lineDashOffset = -(now * (0.009 + tideMod * 0.018) + sides * 22);
     ctx.beginPath();
-    ctx.arc(pxCx, pxCy, latchRadiusPx, 0, TAU);
+    ctx.arc(pxCx, pxCy, tidalLatchRadius, 0, TAU);
     ctx.stroke();
     ctx.setLineDash([]);
     ctx.restore();
   }
 
   // ── Secondary soft inner ring at ~60 % radius — reinforces the field centre ─
-  const innerRingAlpha = (0.04 + downbeatFlash * 0.18 + proximityBoost * 0.22) * dimFactor;
+  const innerRingAlpha = (0.04 + downbeatFlash * 0.18 + proximityBoost * 0.22 + tideMod * 0.14) * dimFactor;
   if (innerRingAlpha > 0.01) {
     ctx.save();
     ctx.globalAlpha = clamp(innerRingAlpha, 0, 1);
@@ -713,7 +730,7 @@ export const drawClockInfluenceHaloPx = (
     ctx.setLineDash([3 / zoom, 6 / zoom]);
     ctx.lineDashOffset = now * 0.006 + sides * 11;
     ctx.beginPath();
-    ctx.arc(pxCx, pxCy, latchRadiusPx * 0.6, 0, TAU);
+    ctx.arc(pxCx, pxCy, tidalLatchRadius * 0.6, 0, TAU);
     ctx.stroke();
     ctx.setLineDash([]);
     ctx.restore();
@@ -842,6 +859,245 @@ export const drawResonanceFilament = (
     ctx.fillStyle = `hsla(${pulseHue}, 96%, 94%, ${alpha})`;
     ctx.fill();
     ctx.shadowBlur = 0;
+  }
+
+  ctx.restore();
+};
+
+// ---------------------------------------------------------------------------
+// Tide wavefront rendering — Phase 1 conduction layer
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns a modulation strength [0-1] for a given normalised-world point
+ * based on all currently active tide waves.
+ *
+ * The modulation peaks when the wavefront passes over the point (offset ≈ 0)
+ * and decays smoothly into the trail zone behind the front.
+ */
+export const getTideModulation = (
+  worldX: number,
+  worldY: number,
+  waves: TideWave[],
+  now: number,
+): number => {
+  let maxMod = 0;
+  for (const wave of waves) {
+    const elapsed = now - wave.bornAt;
+    if (elapsed <= 0 || elapsed >= wave.ttl) continue;
+    const travelProgress = clamp(elapsed / wave.travelMs, 0, 2.2);
+    const ageAlpha = clamp(1 - elapsed / wave.ttl, 0, 1);
+
+    // Front position in normalised world coords
+    const frontX = wave.originX + wave.dirX * wave.travelSpan * travelProgress;
+    const frontY = wave.originY + wave.dirY * wave.travelSpan * travelProgress;
+
+    // Signed offset along the wave direction:
+    //   positive = point is behind the front (in the trail)
+    //   negative = point is ahead of the front (not yet touched)
+    const dx = worldX - frontX;
+    const dy = worldY - frontY;
+    const offset = -(dx * wave.dirX + dy * wave.dirY);
+
+    // Modulation profile: rise in attack zone, peak at front, decay in trail
+    let mod = 0;
+    if (offset > -TIDE_ATTACK_ZONE && offset < TIDE_MODULATION_ZONE) {
+      const raw = offset < 0
+        ? clamp((offset + TIDE_ATTACK_ZONE) / TIDE_ATTACK_ZONE, 0, 1)
+        : clamp(1 - offset / TIDE_MODULATION_ZONE, 0, 1);
+      mod = easeOutCubic(raw) * ageAlpha;
+    }
+    if (mod > maxMod) maxMod = mod;
+  }
+  return maxMod;
+};
+
+/**
+ * Draw a single tide wavefront as a luminous moving ribbon.
+ * Must be called INSIDE the world-space camera transform.
+ *
+ * Visual anatomy:
+ *   • Broad soft trail (behind front): gentle glow that decays rearward
+ *   • Bright leading edge: crisp luminous line at the wavefront
+ *   • Particle shimmer: small bright motes scattered near the front
+ */
+export const drawTideWavefront = (
+  ctx: CanvasRenderingContext2D,
+  wave: TideWave,
+  size: SurfaceSize,
+  now: number,
+  zoom: number,
+): void => {
+  const elapsed = now - wave.bornAt;
+  if (elapsed <= 0 || elapsed >= wave.ttl) return;
+
+  const travelProgress = clamp(elapsed / TIDE_TRAVEL_MS, 0, 2.2);
+  const ageAlpha   = clamp(1 - elapsed / wave.ttl, 0, 1);
+  const attackAlpha = clamp(elapsed / 110, 0, 1);
+  const baseAlpha  = ageAlpha * attackAlpha;
+  if (baseAlpha < 0.008) return;
+
+  const W = size.width;
+  const H = size.height;
+  const isHorizontal = Math.abs(wave.dirX) > 0.5;
+
+  // Front position in pixels
+  const frontNormX = wave.originX + wave.dirX * wave.travelSpan * travelProgress;
+  const frontNormY = wave.originY + wave.dirY * wave.travelSpan * travelProgress;
+  const frontPxX   = frontNormX * W;
+  const frontPxY   = frontNormY * H;
+
+  // Ribbon breathing animation
+  const breathe = 1 + 0.05 * Math.sin(now * 0.0052 + wave.id * 1.73);
+
+  ctx.save();
+
+  // ── Main glow ribbon ──────────────────────────────────────────────────────
+  //
+  // For a rightward-travelling ribbon (rush, dirX=1):
+  //   - Trail stretches leftward from the front
+  //   - A thin edge-slop extends rightward (anti-aliasing)
+  //
+  // The gradient is oriented along the travel axis and maps:
+  //   [trail end] → transparent  →  bright at front  →  [slop] → transparent
+  //
+  const trailPx   = 88 * breathe;
+  const edgeSlopPx = 10;
+  const totalPx    = trailPx + edgeSlopPx;
+
+  if (isHorizontal) {
+    // rect extends from trail-end to just past the front
+    const rushDir = wave.dirX > 0;
+    const rectX = rushDir ? (frontPxX - trailPx) : (frontPxX - edgeSlopPx);
+    const rectW = totalPx;
+    // Fraction of rect width at which the front sits
+    const frontFrac = rushDir ? (trailPx / totalPx) : (edgeSlopPx / totalPx);
+
+    const grad = ctx.createLinearGradient(rectX, 0, rectX + rectW, 0);
+    if (rushDir) {
+      // L→R: transparent trail on left, bright front near right
+      grad.addColorStop(0,             `hsla(${wave.hue}, 90%, 82%, 0)`);
+      grad.addColorStop(frontFrac * 0.40, `hsla(${wave.hue}, 88%, 84%, ${baseAlpha * 0.05})`);
+      grad.addColorStop(frontFrac * 0.75, `hsla(${wave.hue}, 92%, 88%, ${baseAlpha * 0.20})`);
+      grad.addColorStop(frontFrac * 0.94, `hsla(${wave.hue}, 95%, 94%, ${baseAlpha * 0.46})`);
+      grad.addColorStop(frontFrac,        `hsla(${wave.hue}, 96%, 96%, ${baseAlpha * 0.56})`);
+      grad.addColorStop(1,             `hsla(${wave.hue}, 90%, 82%, 0)`);
+    } else {
+      // R→L: bright front near left, transparent trail on right
+      grad.addColorStop(0,             `hsla(${wave.hue}, 90%, 82%, 0)`);
+      grad.addColorStop(frontFrac,        `hsla(${wave.hue}, 96%, 96%, ${baseAlpha * 0.56})`);
+      grad.addColorStop(frontFrac + (1 - frontFrac) * 0.06, `hsla(${wave.hue}, 95%, 94%, ${baseAlpha * 0.46})`);
+      grad.addColorStop(frontFrac + (1 - frontFrac) * 0.28, `hsla(${wave.hue}, 92%, 88%, ${baseAlpha * 0.20})`);
+      grad.addColorStop(frontFrac + (1 - frontFrac) * 0.64, `hsla(${wave.hue}, 88%, 84%, ${baseAlpha * 0.05})`);
+      grad.addColorStop(1,             `hsla(${wave.hue}, 90%, 82%, 0)`);
+    }
+
+    ctx.save();
+    ctx.shadowBlur  = 20 / zoom;
+    ctx.shadowColor = `hsla(${wave.hue}, 88%, 88%, ${baseAlpha * 0.45})`;
+    ctx.fillStyle   = grad;
+    ctx.fillRect(rectX, 0, rectW, H);
+    ctx.restore();
+
+    // Bright leading edge line
+    ctx.save();
+    ctx.globalAlpha  = clamp(baseAlpha * 0.72, 0, 1);
+    ctx.lineWidth    = (1.4 + breathe * 0.6) / zoom;
+    ctx.strokeStyle  = `hsla(${wave.hue}, 96%, 98%, 0.92)`;
+    ctx.shadowBlur   = 14 / zoom;
+    ctx.shadowColor  = `hsla(${wave.hue}, 94%, 92%, 0.8)`;
+    ctx.beginPath();
+    ctx.moveTo(frontPxX, 0);
+    ctx.lineTo(frontPxX, H);
+    ctx.stroke();
+    ctx.restore();
+
+  } else {
+    // Vertical ribbon (swell / ebb)
+    const swellDir = wave.dirY < 0; // swell = upward = dirY < 0
+    const rectY = swellDir ? (frontPxY - edgeSlopPx) : (frontPxY - trailPx);
+    const rectH = totalPx;
+    const frontFrac = swellDir ? (edgeSlopPx / totalPx) : (trailPx / totalPx);
+
+    const grad = ctx.createLinearGradient(0, rectY, 0, rectY + rectH);
+    if (!swellDir) {
+      // T→B (ebb): transparent trail on top, bright front near bottom
+      grad.addColorStop(0,             `hsla(${wave.hue}, 90%, 82%, 0)`);
+      grad.addColorStop(frontFrac * 0.40, `hsla(${wave.hue}, 88%, 84%, ${baseAlpha * 0.05})`);
+      grad.addColorStop(frontFrac * 0.75, `hsla(${wave.hue}, 92%, 88%, ${baseAlpha * 0.20})`);
+      grad.addColorStop(frontFrac * 0.94, `hsla(${wave.hue}, 95%, 94%, ${baseAlpha * 0.46})`);
+      grad.addColorStop(frontFrac,        `hsla(${wave.hue}, 96%, 96%, ${baseAlpha * 0.56})`);
+      grad.addColorStop(1,             `hsla(${wave.hue}, 90%, 82%, 0)`);
+    } else {
+      // B→T (swell): bright front near top, transparent trail below
+      grad.addColorStop(0,             `hsla(${wave.hue}, 90%, 82%, 0)`);
+      grad.addColorStop(frontFrac,        `hsla(${wave.hue}, 96%, 96%, ${baseAlpha * 0.56})`);
+      grad.addColorStop(frontFrac + (1 - frontFrac) * 0.06, `hsla(${wave.hue}, 95%, 94%, ${baseAlpha * 0.46})`);
+      grad.addColorStop(frontFrac + (1 - frontFrac) * 0.28, `hsla(${wave.hue}, 92%, 88%, ${baseAlpha * 0.20})`);
+      grad.addColorStop(frontFrac + (1 - frontFrac) * 0.64, `hsla(${wave.hue}, 88%, 84%, ${baseAlpha * 0.05})`);
+      grad.addColorStop(1,             `hsla(${wave.hue}, 90%, 82%, 0)`);
+    }
+
+    ctx.save();
+    ctx.shadowBlur  = 20 / zoom;
+    ctx.shadowColor = `hsla(${wave.hue}, 88%, 88%, ${baseAlpha * 0.45})`;
+    ctx.fillStyle   = grad;
+    ctx.fillRect(0, rectY, W, rectH);
+    ctx.restore();
+
+    // Bright leading edge line
+    ctx.save();
+    ctx.globalAlpha  = clamp(baseAlpha * 0.72, 0, 1);
+    ctx.lineWidth    = (1.4 + breathe * 0.6) / zoom;
+    ctx.strokeStyle  = `hsla(${wave.hue}, 96%, 98%, 0.92)`;
+    ctx.shadowBlur   = 14 / zoom;
+    ctx.shadowColor  = `hsla(${wave.hue}, 94%, 92%, 0.8)`;
+    ctx.beginPath();
+    ctx.moveTo(0, frontPxY);
+    ctx.lineTo(W, frontPxY);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // ── Particle shimmer — scattered motes near the leading edge ─────────────
+  // Uses deterministic per-wave per-particle seeds so the pattern is stable.
+  const nParticles = 14;
+  for (let i = 0; i < nParticles; i++) {
+    // Deterministic hash from wave ID + particle index
+    const hashA = (wave.id * 1777 + i * 137) & 0xFFFF;
+    const hashB = (wave.id * 2311 + i * 97)  & 0xFFFF;
+    const hashC = (wave.id * 3019 + i * 211) & 0xFFFF;
+    const INV   = 1 / 65536;
+
+    // Position along the leading-edge line (0-1 of canvas W or H)
+    const alongFrac = (hashA * INV) % 1;
+    // Distance behind the front (always trailing, never ahead)
+    const backOff   = (5 + 30 * (hashB * INV)) * ((wave.dirX > 0 || wave.dirY > 0) ? 1 : 1);
+    // Individual twinkle phase
+    const twinkleSpeed = 0.0007 + 0.0006 * (hashC * INV);
+    const twinkle  = Math.sin((now * twinkleSpeed + i * 0.142) * TAU * 0.5 + 1) * 0.5 + 0.5;
+    const pAlpha   = twinkle * baseAlpha * 0.62;
+    if (pAlpha < 0.015) continue;
+
+    let px: number;
+    let py: number;
+    if (isHorizontal) {
+      py = alongFrac * H;
+      px = frontPxX + (wave.dirX > 0 ? -backOff : backOff);
+    } else {
+      px = alongFrac * W;
+      py = frontPxY + (wave.dirY > 0 ? -backOff : backOff);
+    }
+
+    const pR = (0.9 + 2.0 * (hashB * INV)) / zoom;
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(px, py, pR, 0, TAU);
+    ctx.fillStyle   = `hsla(${wave.hue + 15}, 100%, 98%, ${pAlpha})`;
+    ctx.shadowBlur  = pR * 4.5;
+    ctx.shadowColor = `hsla(${wave.hue}, 90%, 92%, ${pAlpha * 0.45})`;
+    ctx.fill();
+    ctx.restore();
   }
 
   ctx.restore();

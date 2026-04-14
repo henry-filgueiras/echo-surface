@@ -48,6 +48,8 @@ import {
   SCOPE_ZOOM_LERP_SPEED,
   SURFACE_PRESETS,
   TAU,
+  TIDE_TRAVEL_MS,
+  TIDE_TTL_MS,
   RESPONSE_GLYPH_HUE,
   VOICE_ROLE_LANES,
   VOICE_ROLE_ORDER,
@@ -83,6 +85,7 @@ import {
   type SimulationState,
   type SurfacePreset,
   type SurfaceSize,
+  type TideWave,
   type ToneVoice,
   type VoiceRole,
   type VoiceRoleOverride,
@@ -118,6 +121,7 @@ import {
   buildResponsePoints,
   chooseHue,
   detectPolygon,
+  detectTideGesture,
   getResponseRole,
   inferVoiceRole,
   makeSurfacePoint,
@@ -156,6 +160,8 @@ import {
   drawPolygonLoopSigil,
   drawResonanceFilament,
   drawScopeSigil,
+  drawTideWavefront,
+  getTideModulation,
   SIGIL_ZOOM_FADE,
   SIGIL_ZOOM_FULL,
 } from "../rendering/emitters";
@@ -435,6 +441,7 @@ export function EchoSurface({
     fusionVoices: [],
     filaments: [],
     surfaceEnergy: 0.18,
+    tideWaves: [],
   });
   const harmonicStateRef = useRef<HarmonicState>(DEFAULT_HARMONIC_STATE);
   const clockStartMsRef = useRef(performance.now());
@@ -444,6 +451,7 @@ export function EchoSurface({
   const loopIdRef = useRef(0);
   const cadenceIdRef = useRef(0);
   const fusionIdRef = useRef(0);
+  const tideIdRef = useRef(0);
   const fusionCooldownRef = useRef(new Map<string, number>());
   const nextRoleOverrideRef = useRef<VoiceRoleOverride>("auto");
   const callResponseEnabledRef = useRef(true);
@@ -1689,6 +1697,44 @@ export function EchoSurface({
       gestureDurationMs,
       simulationRef.current.recentGestures,
     );
+
+    // ---- Tide gesture detection (Phase 1) ----
+    // Large open sweeping gestures (not explicitly role-sealed) spawn a
+    // traveling wavefront instead of a musical voice.  The tide is a
+    // conduction-only layer — no phrase notes are created.
+    if (!touch.previewRole) {
+      const tideInfo = detectTideGesture(
+        inferred.summary,
+        gestureDurationMs,
+        relativePoints,
+      );
+      if (tideInfo) {
+        const wave: TideWave = {
+          id: tideIdRef.current++,
+          bornAt: now,
+          ttl: TIDE_TTL_MS,
+          flavor: tideInfo.flavor,
+          dirX: tideInfo.dirX,
+          dirY: tideInfo.dirY,
+          originX: tideInfo.originX,
+          originY: tideInfo.originY,
+          travelSpan: tideInfo.travelSpan,
+          travelMs: TIDE_TRAVEL_MS,
+          hue: tideInfo.hue,
+        };
+        simulationRef.current.tideWaves.push(wave);
+        // Keep at most 3 concurrent tide waves to avoid visual overload
+        if (simulationRef.current.tideWaves.length > 3) {
+          simulationRef.current.tideWaves.splice(
+            0,
+            simulationRef.current.tideWaves.length - 3,
+          );
+        }
+        return;
+      }
+    }
+    // ---- end tide gesture ----
+
     const role = touch.previewRole ?? inferred.role;
     const contourPoints = shapePointsForRole(
       role,
@@ -2514,6 +2560,13 @@ export function EchoSurface({
           const bElapsed = Math.max(0, now - loop.scheduledAtMs);
           const bCycleProgress = clamp((bElapsed % bLoopDurationMs) / bLoopDurationMs, 0, 0.9999);
 
+          // Tide modulation for this beacon's world position
+          const beaconTideMod = getTideModulation(
+            bSpec.cx, bSpec.cy,
+            state.tideWaves,
+            now,
+          );
+
           drawClockInfluenceHaloPx(
             context,
             pxCx,
@@ -2526,10 +2579,20 @@ export function EchoSurface({
             isDrawing,
             latchRadiusPx,
             now,
+            beaconTideMod,
           );
         }
       }
       // ── end clock influence halo pre-pass ─────────────────────────────────
+
+      // ── Tide wavefront rendering ───────────────────────────────────────────
+      // Prune expired waves, then render each active wavefront as a luminous
+      // ribbon inside the world-space camera transform.
+      state.tideWaves = state.tideWaves.filter((w) => now - w.bornAt < w.ttl);
+      for (const wave of state.tideWaves) {
+        drawTideWavefront(context, wave, size, now, cam.zoom);
+      }
+      // ── end tide wavefront rendering ───────────────────────────────────────
 
       state.flashes = state.flashes.filter((flash) => now - flash.bornAt < flash.ttl);
 
@@ -2868,8 +2931,25 @@ export function EchoSurface({
           );
           const activeRest = activeNote?.kind === "rest";
           const headPixel = normalizedToPixels(head, size);
+
+          // ── Tide modulation for this contour's playback head position ──────
+          // Latched contours (and all contours) brighten when a wavefront passes.
+          const headTideMod = getTideModulation(
+            head.x, head.y,
+            state.tideWaves,
+            now,
+          );
+          const tideHeadRadiusBoost = headTideMod * 0.18; // +18% radius at peak
+          const tideHeadAlphaBoost  = headTideMod * 0.38; // +38% alpha at peak
+
           const headRadius =
-            loop.role === "pad" ? 34 : loop.role === "bass" ? 30 : loop.role === "echo" ? 32 : 26;
+            (loop.role === "pad" ? 34 : loop.role === "bass" ? 30 : loop.role === "echo" ? 32 : 26)
+            * (1 + tideHeadRadiusBoost);
+          const baseHeadAlpha0 = activeRest ? 0.18 : 0.44;
+          const baseHeadAlpha1 = activeRest ? 0.08 : 0.18;
+          const headAlpha0 = Math.min(baseHeadAlpha0 + tideHeadAlphaBoost * baseHeadAlpha0, 0.92);
+          const headAlpha1 = Math.min(baseHeadAlpha1 + tideHeadAlphaBoost * baseHeadAlpha1, 0.5);
+
           const headGlow = context.createRadialGradient(
             headPixel.x,
             headPixel.y,
@@ -2881,14 +2961,14 @@ export function EchoSurface({
           headGlow.addColorStop(
             0,
             loop.dialogueKind === "response"
-              ? `hsla(${visualHue}, 90%, 84%, ${activeRest ? 0.18 : 0.44})`
-              : getRoleColor(loop.role, activeRest ? 0.16 : 0.42, 18, 8),
+              ? `hsla(${visualHue}, 90%, 84%, ${headAlpha0})`
+              : getRoleColor(loop.role, headAlpha0, 18 + headTideMod * 8, 8 + headTideMod * 4),
           );
           headGlow.addColorStop(
             0.56,
             loop.dialogueKind === "response"
-              ? `hsla(${visualHue}, 82%, 72%, ${activeRest ? 0.08 : 0.18})`
-              : getRoleColor(loop.role, activeRest ? 0.08 : 0.16, 6, 2),
+              ? `hsla(${visualHue}, 82%, 72%, ${headAlpha1})`
+              : getRoleColor(loop.role, headAlpha1, 6, 2),
           );
           headGlow.addColorStop(
             1,
@@ -2901,13 +2981,15 @@ export function EchoSurface({
           context.arc(headPixel.x, headPixel.y, headRadius, 0, TAU);
           context.fill();
 
+          // Tide boost also enlarges the role glyph slightly
+          const glyphSizeBoost = 1 + headTideMod * 0.28;
           drawRoleGlyph(
             context,
             loop.role,
             headPixel.x,
             headPixel.y,
-            6.2 + (activeNote?.accent ?? 0.4) * 3.2,
-            activeRest ? 0.4 : 0.88,
+            (6.2 + (activeNote?.accent ?? 0.4) * 3.2) * glyphSizeBoost,
+            activeRest ? 0.4 : Math.min(0.88 + headTideMod * 0.12, 1.0),
             now * 0.0016,
             loop.dialogueKind === "response" ? visualHue : undefined,
             activeRest,
@@ -3794,7 +3876,11 @@ export function EchoSurface({
         const progress = clamp(age / tether.ttl, 0, 1);
         // Envelope: fast rise (first 10 %), long decay
         const rise  = Math.min(age / (tether.ttl * 0.10), 1);
-        const alpha = rise * (1 - progress) ** 1.4 * 0.78;
+        // Tide modulation: boost tether visibility if a wavefront covers it
+        const tetherMidX = (tether.fromWorldX + tether.toWorldX) * 0.5;
+        const tetherMidY = (tether.fromWorldY + tether.toWorldY) * 0.5;
+        const tetherTideMod = getTideModulation(tetherMidX, tetherMidY, state.tideWaves, now);
+        const alpha = (rise * (1 - progress) ** 1.4 * 0.78) * (1 + tetherTideMod * 0.6);
         if (alpha < 0.01) continue;
 
         const fromPx = {

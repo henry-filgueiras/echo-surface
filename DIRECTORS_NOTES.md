@@ -293,6 +293,7 @@ At the moment, EchoSurface is roughly:
 - a polyrhythmic ecosystem where polygon loops can be bound by resonance filaments that make rhythmic ratios visible and audible
 - a touch-first shape summoning system where long-press opens a radial palette that lets users stamp canonical rhythmic polygons without needing to draw them precisely
 - a proximity-based clock hierarchy where polygon shapes act as local time beacons and new contours drawn near them inherit the beacon's N-beat cycle and phase
+- a conduction layer where large sweeping gestures spawn traveling wavefronts (tides) that visibly pass through timing fields and temporarily awaken clock halos, playback heads, and latch tethers
 
 It is not trying to be a DAW, piano roll, or synth workstation.
 
@@ -375,6 +376,66 @@ This is rendered as a pre-pass inside the world-space camera transform, before t
 A seventh feeling now worth protecting:
 
 7. "I could feel where the beat lives before I drew the phrase."
+
+### Phase 17: Tides — Conduction Wavefront Layer
+
+As of April 14, 2026.
+
+The surface now responds to large open sweeping gestures with a visible traveling wavefront — a **tide** — that temporarily modulates nearby timing fields as it passes through them. This is a performance and conduction layer, not a composition layer. No phrase notes are created. No permanent mutations happen. The user is conducting the field, not programming it.
+
+**Conceptual framing.** A tide is what happens between notes, not what makes the notes. The conductor's arm sweeping left-to-right is not playing a pitch — it is shaping time, energy, and density across the ensemble. The tide does the same: it passes through clock beacons, latched contours, and polygon sigils and leaves them slightly more awake, more vivid, and subtly stretched or rushed in their cycle. The effect decays fully within 2–3 seconds.
+
+**Gesture detection.** Tide gestures are large open sweeps classified after polygon and scope detection have already run. A gesture becomes a tide when:
+
+- Total travel > 0.48 normalised canvas units
+- Dominant-axis span > 0.40 (either X or Y must dominate)
+- Dominant axis is at least 1.8× the minor axis (ensures a directional sweep, not a wide arc)
+- Circularity < 0.44 and loopiness < 0.40 (rules out echo/scope gestures)
+- Duration ≥ 160 ms (rules out accidental fast flicks)
+
+The four supported flavors and their visual hues:
+
+- **rush** (L→R horizontal): sea-green / 168°
+- **linger** (R→L horizontal): cool blue / 210°
+- **swell** (B→T vertical, upward): warm gold / 42°
+- **ebb** (T→B vertical, downward): violet / 272°
+
+If no flavor can be classified (ambiguous direction), the gesture falls through to normal voice inference.
+
+An explicit role seal (`previewRole`) bypasses tide detection entirely, preserving the seal's intent.
+
+**Wavefront rendering.** The tide renders as a semi-transparent luminous ribbon traveling in the gesture direction:
+
+- A broad soft gradient trail behind the leading edge (88 px wide, fades rearward)
+- A bright luminous line at the leading edge (slightly breathing in width)
+- 14 scattered particle motes near the front, each with its own twinkle phase
+- Total lifetime 2.4 seconds; wavefront crosses gesture span in ~680 ms then coasts
+- Max 3 concurrent waves (oldest pruned first) to prevent visual overload
+
+The wavefront is rendered inside the world-space camera transform, after the clock influence halo pre-pass and before contour/flash rendering. It sits visually above the field glows but below the phrase voices.
+
+**Field modulation.** As the wavefront passes over a clock beacon or contour playback head, a `getTideModulation(worldX, worldY, waves, now)` helper computes a [0–1] modulation factor based on signed distance from the wavefront front edge:
+
+- Attack zone (4% of canvas ahead of front): modulation rises
+- At front: peak modulation
+- Trail zone (20% behind front): exponential-eased decay
+- Otherwise: zero
+
+Affected systems:
+
+1. **Clock influence halos** (`drawClockInfluenceHaloPx`): receives optional `tideMod` (0–1). At peak, the downbeat flash is boosted by +0.55, interior glow by +5%, ring base alpha by +18%, ring shadow by +16 px, and the halo radius dilates +10%.
+
+2. **Contour playback heads**: head glow radius expands up to +18%, alpha lifts up to +38%, and the role glyph scales up to +28% at peak modulation.
+
+3. **Latch tethers**: tether alpha lifts by up to +60% at peak, making the temporal family relationship briefly more legible as the wave sweeps through.
+
+**Architecture.** `TideWave` and `TideFlavor` live in `model.ts`. Detection (`detectTideGesture`) lives in `grammar.ts` alongside other gesture classifiers. Rendering (`drawTideWavefront`, `getTideModulation`) live in `emitters.ts`. `SimulationState` gained a `tideWaves: TideWave[]` field. The `finalizeTouch` path in `EchoSurface.tsx` runs tide detection after `inferVoiceRole` but before voice spawning, returning early if a tide is created.
+
+**Strong Phase 1 constraint maintained.** No deep semantic mutations in Phase 1. The moduluation is 100% visual and reversible. Cycle durations, note pitches, harmonic context, and phrase structures are all untouched. The tide teaches by resonance — the field brightens and pulses when the wave arrives, then settles back.
+
+An eighth feeling now worth protecting:
+
+8. "I could feel the field breathing when I swept my hand across it."
 
 ### Phase 10: Scene Morphing — Macro Musical Form
 

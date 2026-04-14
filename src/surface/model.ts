@@ -250,6 +250,8 @@ export type SimulationState = {
   fusionVoices: FusionVoice[];
   filaments: ResonanceFilament[];
   surfaceEnergy: number;
+  /** Active tide wavefronts — conduction layer spawned by large sweep gestures. */
+  tideWaves: TideWave[];
 };
 
 export type MemoryChip = {
@@ -779,6 +781,74 @@ export const DEFAULT_HARMONIC_STATE: HarmonicState = {
   barsPerChord: 2,
   bpm: 100,
 };
+
+// ---------------------------------------------------------------------------
+// Tides — Phase 1: conduction wavefront system
+// ---------------------------------------------------------------------------
+
+/**
+ * The four sweep flavors derived from gesture direction.
+ * Horizontal: rush (L→R) / linger (R→L)
+ * Vertical:   swell (B→T, upward) / ebb (T→B, downward)
+ */
+export type TideFlavor = "rush" | "linger" | "swell" | "ebb";
+
+/**
+ * A traveling wavefront spawned by a large open sweep gesture.
+ * Phase 1: visual conduction layer only — no deep semantic mutations.
+ */
+export type TideWave = {
+  id: number;
+  bornAt: number;
+  /** Total lifetime in ms — wave fades and is pruned after this. */
+  ttl: number;
+  flavor: TideFlavor;
+  /** Unit direction vector in normalised-world space (±1 on one axis, 0 on the other). */
+  dirX: number;
+  dirY: number;
+  /** Wavefront origin — leading edge of gesture in normalised world coords. */
+  originX: number;
+  originY: number;
+  /**
+   * Total distance the wavefront travels (normalised units).
+   * Derived from gesture span + extra lead-out so it clears the canvas.
+   */
+  travelSpan: number;
+  /** ms for the front to traverse travelSpan — controls apparent wave speed. */
+  travelMs: number;
+  /** Colour hue (0-360) — flavour-specific, used for ribbon tint. */
+  hue: number;
+};
+
+// ── Tide detection thresholds (iPad-forgiving) ─────────────────────────────
+/** Minimum normalised gesture travel to qualify as a tide sweep. */
+export const TIDE_MIN_TRAVEL = 0.48;
+/** Minimum dominant-axis span (normalised) for tide classification. */
+export const TIDE_MIN_SPAN = 0.40;
+/** Maximum circularity — prevents scopes / echo gestures being captured. */
+export const TIDE_MAX_CIRCULARITY = 0.44;
+/** Maximum loopiness — sweeps should be mostly linear. */
+export const TIDE_MAX_LOOPINESS = 0.40;
+/** Dominant axis must be at least this many times the minor axis. */
+export const TIDE_DIRECTION_RATIO = 1.8;
+/** Minimum gesture duration — rules out accidental fast flicks. */
+export const TIDE_MIN_DURATION_MS = 160;
+
+// ── Tide wave behaviour ─────────────────────────────────────────────────────
+/** Total wavefront lifetime in ms. */
+export const TIDE_TTL_MS = 2400;
+/** Time for the wavefront to cross travelSpan. */
+export const TIDE_TRAVEL_MS = 680;
+/**
+ * Normalised distance behind the wavefront front edge within which
+ * clock beacons / latched contours feel the modulation (trail zone).
+ */
+export const TIDE_MODULATION_ZONE = 0.20;
+/**
+ * Normalised distance ahead of the wavefront where modulation starts
+ * to rise (anticipation / attack zone).
+ */
+export const TIDE_ATTACK_ZONE = 0.04;
 
 export const isSurfacePreset = (value: string | null): value is SurfacePreset =>
   value !== null && SURFACE_PRESETS.includes(value as SurfacePreset);

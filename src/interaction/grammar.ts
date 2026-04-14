@@ -14,12 +14,19 @@ import {
   POLYGON_SQUARE_PREFERENCE_MARGIN,
   RESPONSE_ROLE_MAP,
   TAU,
+  TIDE_DIRECTION_RATIO,
+  TIDE_MAX_CIRCULARITY,
+  TIDE_MAX_LOOPINESS,
+  TIDE_MIN_DURATION_MS,
+  TIDE_MIN_SPAN,
+  TIDE_MIN_TRAVEL,
   type CameraState,
   type ContourAnchor,
   type GestureSummary,
   type NormalizedPoint,
   type PolygonSpec,
   type RecentGesture,
+  type TideFlavor,
   type VoiceRole,
   VOICE_ROLE_LANES,
 } from "../surface/model";
@@ -788,4 +795,110 @@ export const buildPolygonAnchors = (
       emphasis: 1.0,
     } satisfies ContourAnchor;
   });
+};
+
+// ---------------------------------------------------------------------------
+// Tide gesture detection — large open sweep → traveling wavefront
+// ---------------------------------------------------------------------------
+
+/**
+ * Flavour-specific visual hues for tide wavefronts.
+ * Chosen to feel elemental and distinct from voice-role palette.
+ */
+const TIDE_FLAVOR_HUE: Record<TideFlavor, number> = {
+  rush:   168, // sea-green / energising
+  linger: 210, // cool blue / stretching
+  swell:  42,  // warm gold / rising
+  ebb:    272, // violet / receding
+};
+
+export type TideGestureResult = {
+  flavor: TideFlavor;
+  dirX: number;
+  dirY: number;
+  /** Wavefront origin (normalised world) — leading edge of the sweep. */
+  originX: number;
+  originY: number;
+  /** Distance the wavefront should travel (normalised world). */
+  travelSpan: number;
+  hue: number;
+};
+
+/**
+ * Returns tide gesture data when the supplied summary describes a large
+ * open sweep, or null when the gesture should be treated as a musical phrase.
+ *
+ * Detection criteria (all must be satisfied):
+ *   • Large travel and dominant-axis span
+ *   • Low circularity and loopiness (not a scope / echo gesture)
+ *   • One axis clearly dominant over the other (directional sweep)
+ *   • Minimum duration to exclude accidental flicks
+ *
+ * Must be called AFTER polygon and scope checks already returned — those
+ * gestures are consumed before reaching this detector.
+ */
+export const detectTideGesture = (
+  summary: GestureSummary,
+  gestureDurationMs: number,
+  rawPoints: NormalizedPoint[],
+): TideGestureResult | null => {
+  // ── Gate checks ────────────────────────────────────────────────────────────
+  if (
+    summary.travel < TIDE_MIN_TRAVEL ||
+    Math.max(summary.xSpan, summary.ySpan) < TIDE_MIN_SPAN ||
+    summary.circularity > TIDE_MAX_CIRCULARITY ||
+    summary.loopiness > TIDE_MAX_LOOPINESS ||
+    gestureDurationMs < TIDE_MIN_DURATION_MS
+  ) return null;
+
+  // ── Directional gate — dominant axis must be clearly wider ─────────────────
+  const isHorizontal = summary.xSpan > summary.ySpan * TIDE_DIRECTION_RATIO;
+  const isVertical   = summary.ySpan > summary.xSpan * TIDE_DIRECTION_RATIO;
+  if (!isHorizontal && !isVertical) return null;
+
+  const centroid = summary.centroid;
+  let flavor: TideFlavor;
+  let dirX: number;
+  let dirY: number;
+  let originX: number;
+  let originY: number;
+  let travelSpan: number;
+
+  if (isHorizontal) {
+    // forwardBias > 0 means the gesture moved mostly left-to-right (rush)
+    const goingRight = summary.forwardBias > 0;
+    flavor = goingRight ? "rush" : "linger";
+    dirX = goingRight ? 1 : -1;
+    dirY = 0;
+    // Origin = leading edge of the gesture in travel direction
+    originX = goingRight
+      ? centroid.x - summary.xSpan * 0.5   // leftmost point for rightward sweep
+      : centroid.x + summary.xSpan * 0.5;  // rightmost point for leftward sweep
+    originY = centroid.y;
+    // Extend span so the wavefront clears the far canvas edge
+    travelSpan = summary.xSpan + 0.30;
+  } else {
+    // Vertical: check where the gesture started vs ended
+    const firstY = rawPoints[0]?.y ?? centroid.y;
+    const lastY  = rawPoints[rawPoints.length - 1]?.y ?? firstY;
+    const goingDown = lastY > firstY;
+    flavor = goingDown ? "ebb" : "swell";
+    dirX = 0;
+    dirY = goingDown ? 1 : -1;
+    originX = centroid.x;
+    originY = goingDown
+      ? centroid.y - summary.ySpan * 0.5   // topmost point for downward sweep
+      : centroid.y + summary.ySpan * 0.5;  // bottommost point for upward sweep
+    travelSpan = summary.ySpan + 0.30;
+  }
+
+  return {
+    flavor,
+    dirX,
+    dirY,
+    originX,
+    originY,
+    travelSpan,
+    hue: TIDE_FLAVOR_HUE[flavor],
+  };
 };
