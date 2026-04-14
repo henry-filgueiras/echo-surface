@@ -294,6 +294,7 @@ At the moment, EchoSurface is roughly:
 - a touch-first shape summoning system where long-press opens a radial palette that lets users stamp canonical rhythmic polygons without needing to draw them precisely
 - a proximity-based clock hierarchy where polygon shapes act as local time beacons and new contours drawn near them inherit the beacon's N-beat cycle and phase
 - a conduction layer where large sweeping gestures spawn traveling wavefronts (tides) that visibly pass through timing fields and temporarily awaken clock halos, playback heads, and latch tethers
+- a tide interference layer where two overlapping wavefronts produce a visible collision bloom, a spiral vortex, and amplified field response at the crossing point — making simultaneous conductor gestures feel orchestrally meaningful
 
 It is not trying to be a DAW, piano roll, or synth workstation.
 
@@ -436,6 +437,43 @@ Affected systems:
 An eighth feeling now worth protecting:
 
 8. "I could feel the field breathing when I swept my hand across it."
+
+### Phase 17.5: Tide Interference — Orchestral Collision Layer
+
+As of April 14, 2026.
+
+When two active tide wavefronts overlap or cross paths, the system now renders a visible **collision bloom** at their intersection and amplifies nearby field elements — making overlapping conductor gestures feel orchestrally meaningful and physically grounded.
+
+**Conceptual framing.** Two conductors sweeping in different directions simultaneously are not playing the same thing twice. They are creating interference — a momentary energy concentration where the two intentions physically meet. That superposition should be visible and felt by the ensemble around it. The bloom is not decorative; it is the visual proof that two forces coincided.
+
+**Interference detection.** Each render frame, `computeTideInterferenceNodes` checks all pairs of active waves (O(n²), n ≤ 3) for a geometric crossing point:
+
+- **Horizontal × Vertical** — clean point crossing at `(frontX_H, frontY_V)`. The most dramatic case: two perpendicular sweeps produce a specific pixel address.
+- **H × H (near-coincident)** — bloom at horizontal midpoint, only when the two fronts are within 2× the modulation zone of each other.
+- **V × V (near-coincident)** — same, vertical midpoint.
+
+Strength is the product of both waves' individual modulation at the crossing point (`modA × modB`). This means the bloom only lights up when both fronts are simultaneously present — it decays naturally as either wave moves on.
+
+**Collision bloom rendering.** `drawTideInterferenceBloom` draws four back-to-front layers at the crossing point:
+
+1. **Outer soft radial haze** — blended hue (short-arc mix of both wave hues), radius scales with strength.
+2. **Interference rings** — two concentric pulsing rings, each tinted to one of the source wave hues, oscillating with a golden-ratio phase offset so they feel independently alive.
+3. **Inner bright core** — white-hot radial bloom that breathes slowly; marks the exact collision address.
+4. **Spiral vortex particles** — 20 deterministically seeded motes orbiting the collision point. They alternate between the two source hues, spiral outward with pulsing radii, and drift continuously at a slow angular rate. The orbit is continuous while the collision is active; it doesn't restart each frame.
+
+**Nearby field amplification.** A `getTideInterferenceMod(worldX, worldY, nodes)` helper returns a proximity-based boost [0–1] based on distance from the nearest collision node (influence radius: 0.24 normalised units). This boost is added at ×1.4 on top of the existing single-wave `getTideModulation` result at three sites:
+
+- **Clock influence halos**: downbeat flash, ring brightness, and radius dilation increase further inside the collision zone.
+- **Contour playback heads**: glow radius and alpha boosted beyond single-wave level.
+- **Latch tethers**: alpha lift extended — temporal family relationships become maximally legible at the collision moment.
+
+**Architecture.** `TideInterferenceNode`, `TIDE_INTERFERENCE_RADIUS`, `computeTideInterferenceNodes`, `getTideInterferenceMod`, and `drawTideInterferenceBloom` all live in `emitters.ts`. No new state on `SimulationState` — nodes are ephemeral and recomputed each frame. The interference pre-compute runs once per render frame before the clock-halo pass so all downstream systems share the same node list. The bloom draw happens inside the world-space camera transform, above the wavefront ribbons but below note flashes.
+
+**Constraint maintained.** No musical mutations. No permanent field changes. The collision is 100% visual and conduction-layer. It decays completely when either contributing wave expires.
+
+A ninth feeling now worth protecting:
+
+9. "When two sweeps crossed, the whole ensemble heard it."
 
 ### Phase 10: Scene Morphing — Macro Musical Form
 

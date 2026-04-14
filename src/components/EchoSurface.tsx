@@ -154,16 +154,20 @@ import {
   midiToFrequency,
 } from "../music/engine";
 import {
+  computeTideInterferenceNodes,
   drawClockInfluenceHaloPx,
   drawFilamentPreview,
   drawMotifSigil,
   drawPolygonLoopSigil,
   drawResonanceFilament,
   drawScopeSigil,
+  drawTideInterferenceBloom,
   drawTideWavefront,
+  getTideInterferenceMod,
   getTideModulation,
   SIGIL_ZOOM_FADE,
   SIGIL_ZOOM_FULL,
+  type TideInterferenceNode,
 } from "../rendering/emitters";
 import {
   drawFusionGlyph,
@@ -2502,6 +2506,16 @@ export function EchoSurface({
 
       const glyphBoost = 1 + cadenceGlow * 0.55;
 
+      // ── Tide interference pre-compute ─────────────────────────────────────
+      // Compute collision nodes from all currently active wave pairs.
+      // Done once here so the result is available for the beacon-halo pass,
+      // the contour-head pass, and the latch-tether pass that follow.
+      const interferenceNodes: TideInterferenceNode[] = computeTideInterferenceNodes(
+        state.tideWaves,
+        now,
+      );
+      // ── end tide interference pre-compute ────────────────────────────────
+
       // ── Clock influence halo pre-pass ─────────────────────────────────────
       // Render the timing-field halos for all active polygon beacons FIRST so
       // they sit underneath sigils and contours.  The halos teach the user
@@ -2560,12 +2574,13 @@ export function EchoSurface({
           const bElapsed = Math.max(0, now - loop.scheduledAtMs);
           const bCycleProgress = clamp((bElapsed % bLoopDurationMs) / bLoopDurationMs, 0, 0.9999);
 
-          // Tide modulation for this beacon's world position
+          // Tide modulation for this beacon's world position.
+          // Interference collision zones amplify the halo beyond single-wave level.
           const beaconTideMod = getTideModulation(
             bSpec.cx, bSpec.cy,
             state.tideWaves,
             now,
-          );
+          ) + getTideInterferenceMod(bSpec.cx, bSpec.cy, interferenceNodes) * 1.4;
 
           drawClockInfluenceHaloPx(
             context,
@@ -2592,7 +2607,12 @@ export function EchoSurface({
       for (const wave of state.tideWaves) {
         drawTideWavefront(context, wave, size, now, cam.zoom);
       }
-      // ── end tide wavefront rendering ───────────────────────────────────────
+      // ── Tide interference bloom rendering ─────────────────────────────────
+      // Collision blooms sit above the wavefront ribbons but below note flashes.
+      for (const node of interferenceNodes) {
+        drawTideInterferenceBloom(context, node, size, now, cam.zoom);
+      }
+      // ── end tide wavefront + interference rendering ────────────────────────
 
       state.flashes = state.flashes.filter((flash) => now - flash.bornAt < flash.ttl);
 
@@ -2934,11 +2954,12 @@ export function EchoSurface({
 
           // ── Tide modulation for this contour's playback head position ──────
           // Latched contours (and all contours) brighten when a wavefront passes.
+          // Interference collision zones deliver an additional amplification boost.
           const headTideMod = getTideModulation(
             head.x, head.y,
             state.tideWaves,
             now,
-          );
+          ) + getTideInterferenceMod(head.x, head.y, interferenceNodes) * 1.4;
           const tideHeadRadiusBoost = headTideMod * 0.18; // +18% radius at peak
           const tideHeadAlphaBoost  = headTideMod * 0.38; // +38% alpha at peak
 
@@ -3879,7 +3900,8 @@ export function EchoSurface({
         // Tide modulation: boost tether visibility if a wavefront covers it
         const tetherMidX = (tether.fromWorldX + tether.toWorldX) * 0.5;
         const tetherMidY = (tether.fromWorldY + tether.toWorldY) * 0.5;
-        const tetherTideMod = getTideModulation(tetherMidX, tetherMidY, state.tideWaves, now);
+        const tetherTideMod = getTideModulation(tetherMidX, tetherMidY, state.tideWaves, now)
+          + getTideInterferenceMod(tetherMidX, tetherMidY, interferenceNodes) * 1.4;
         const alpha = (rise * (1 - progress) ** 1.4 * 0.78) * (1 + tetherTideMod * 0.6);
         if (alpha < 0.01) continue;
 

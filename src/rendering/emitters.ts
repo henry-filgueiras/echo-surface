@@ -912,6 +912,287 @@ export const getTideModulation = (
   return maxMod;
 };
 
+// ── Tide interference detection & rendering ──────────────────────────────────
+
+/**
+ * A transient collision zone where two active tide wavefronts overlap.
+ * Computed fresh each render frame — no persistent state needed.
+ *
+ * When two waves' leading edges pass through the same region simultaneously,
+ * a bloom + vortex appears at the intersection and nearby clock halos,
+ * playback heads, and latch tethers receive an extra amplitude boost.
+ */
+export type TideInterferenceNode = {
+  /** Crossing point in normalised world coords (0–1). */
+  worldX: number;
+  worldY: number;
+  /** Combined modulation strength [0–1] — product of both wave mods at the crossing. */
+  strength: number;
+  /** Hue of the first contributing wave (0–360). */
+  hueA: number;
+  /** Hue of the second contributing wave (0–360). */
+  hueB: number;
+  /**
+   * Stable string key — `"${waveA.id}-${waveB.id}"`.
+   * Used as a deterministic seed for vortex particle layout.
+   */
+  id: string;
+};
+
+/**
+ * Normalised-world influence radius around each interference node.
+ * Points within this distance receive a modulation boost.
+ */
+export const TIDE_INTERFERENCE_RADIUS = 0.24;
+
+/** Per-wave modulation at a point — used internally for interference strength. */
+const getWaveModAtPoint = (
+  wave: TideWave,
+  worldX: number,
+  worldY: number,
+  now: number,
+): number => {
+  const elapsed = now - wave.bornAt;
+  if (elapsed <= 0 || elapsed >= wave.ttl) return 0;
+  const travelProgress = clamp(elapsed / TIDE_TRAVEL_MS, 0, 2.2);
+  const ageAlpha       = clamp(1 - elapsed / wave.ttl, 0, 1);
+  const frontX = wave.originX + wave.dirX * wave.travelSpan * travelProgress;
+  const frontY = wave.originY + wave.dirY * wave.travelSpan * travelProgress;
+  const dx     = worldX - frontX;
+  const dy     = worldY - frontY;
+  const offset = -(dx * wave.dirX + dy * wave.dirY);
+  if (offset > -TIDE_ATTACK_ZONE && offset < TIDE_MODULATION_ZONE) {
+    const raw = offset < 0
+      ? clamp((offset + TIDE_ATTACK_ZONE) / TIDE_ATTACK_ZONE, 0, 1)
+      : clamp(1 - offset / TIDE_MODULATION_ZONE, 0, 1);
+    return easeOutCubic(raw) * ageAlpha;
+  }
+  return 0;
+};
+
+/**
+ * Returns the geometric crossing point for a pair of wavefronts.
+ *
+ *   H × V  →  exact point crossing (most dramatic case).
+ *   H × H  →  horizontal midpoint — only if fronts are close enough.
+ *   V × V  →  vertical midpoint   — only if fronts are close enough.
+ */
+const getTideCrossPoint = (
+  waveA: TideWave,
+  waveB: TideWave,
+  now: number,
+): { worldX: number; worldY: number } | null => {
+  const isHA = Math.abs(waveA.dirX) > 0.5;
+  const isHB = Math.abs(waveB.dirX) > 0.5;
+  const eA   = now - waveA.bornAt;
+  const eB   = now - waveB.bornAt;
+  if (eA <= 0 || eA >= waveA.ttl || eB <= 0 || eB >= waveB.ttl) return null;
+  const pA  = clamp(eA / TIDE_TRAVEL_MS, 0, 2.2);
+  const pB  = clamp(eB / TIDE_TRAVEL_MS, 0, 2.2);
+  const fAX = waveA.originX + waveA.dirX * waveA.travelSpan * pA;
+  const fAY = waveA.originY + waveA.dirY * waveA.travelSpan * pA;
+  const fBX = waveB.originX + waveB.dirX * waveB.travelSpan * pB;
+  const fBY = waveB.originY + waveB.dirY * waveB.travelSpan * pB;
+
+  if (isHA && !isHB) {
+    // horizontal × vertical → clean point crossing
+    return { worldX: fAX, worldY: fBY };
+  }
+  if (!isHA && isHB) {
+    // vertical × horizontal → clean point crossing
+    return { worldX: fBX, worldY: fAY };
+  }
+  if (isHA) {
+    // both horizontal — bloom at midpoint, only if fronts are nearly coincident
+    if (Math.abs(fAX - fBX) > TIDE_MODULATION_ZONE * 2) return null;
+    return { worldX: (fAX + fBX) * 0.5, worldY: 0.5 };
+  }
+  // both vertical — bloom at midpoint, only if fronts are nearly coincident
+  if (Math.abs(fAY - fBY) > TIDE_MODULATION_ZONE * 2) return null;
+  return { worldX: 0.5, worldY: (fAY + fBY) * 0.5 };
+};
+
+/**
+ * Compute all active interference nodes from the current tide wave set.
+ * O(n²) over active waves — n ≤ 3 so overhead is negligible.
+ * Call once per render frame.
+ */
+export const computeTideInterferenceNodes = (
+  waves: TideWave[],
+  now: number,
+): TideInterferenceNode[] => {
+  const nodes: TideInterferenceNode[] = [];
+  for (let i = 0; i < waves.length; i++) {
+    for (let j = i + 1; j < waves.length; j++) {
+      const wA    = waves[i];
+      const wB    = waves[j];
+      const cross = getTideCrossPoint(wA, wB, now);
+      if (!cross) continue;
+      const modA     = getWaveModAtPoint(wA, cross.worldX, cross.worldY, now);
+      const modB     = getWaveModAtPoint(wB, cross.worldX, cross.worldY, now);
+      const strength = modA * modB;
+      if (strength < 0.025) continue;
+      nodes.push({
+        worldX: cross.worldX,
+        worldY: cross.worldY,
+        strength,
+        hueA: wA.hue,
+        hueB: wB.hue,
+        id: `${wA.id}-${wB.id}`,
+      });
+    }
+  }
+  return nodes;
+};
+
+/**
+ * Returns the proximity-based modulation boost [0-1] a world-space point
+ * receives from nearby interference nodes.
+ *
+ * Additive on top of the single-wave modulation — used to amplify clock halos,
+ * playback heads, and latch tethers inside the collision zone.
+ */
+export const getTideInterferenceMod = (
+  worldX: number,
+  worldY: number,
+  nodes: TideInterferenceNode[],
+): number => {
+  let best = 0;
+  for (const node of nodes) {
+    const dx   = worldX - node.worldX;
+    const dy   = worldY - node.worldY;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist >= TIDE_INTERFERENCE_RADIUS) continue;
+    const proximity = 1 - dist / TIDE_INTERFERENCE_RADIUS;
+    const boost     = easeOutCubic(proximity) * node.strength;
+    if (boost > best) best = boost;
+  }
+  return best;
+};
+
+/**
+ * Draw the collision bloom and spiral vortex for one interference node.
+ * Must be called INSIDE the world-space camera transform.
+ *
+ * Layers back-to-front:
+ *   1. Outer soft radial haze — blended hue of both waves
+ *   2. Interference rings — two concentric pulsing rings, each tinted per wave
+ *   3. Inner bright core — white-hot radial bloom that breathes
+ *   4. Spiral vortex particles — motes orbiting outward, alternating hues
+ */
+export const drawTideInterferenceBloom = (
+  ctx: CanvasRenderingContext2D,
+  node: TideInterferenceNode,
+  size: SurfaceSize,
+  now: number,
+  zoom: number,
+): void => {
+  const { strength, worldX, worldY, hueA, hueB, id } = node;
+  if (strength < 0.025) return;
+
+  const cx = worldX * size.width;
+  const cy = worldY * size.height;
+
+  // Short-arc hue blend between the two wave hues
+  let dHue = hueB - hueA;
+  if (dHue >  180) dHue -= 360;
+  if (dHue < -180) dHue += 360;
+  const bloomHue = ((hueA + dHue * 0.5) + 360) % 360;
+
+  const alpha = clamp(strength, 0, 1);
+
+  // ── 1. Outer soft radial haze ──────────────────────────────────────────
+  const hazeR    = (72 + 44 * strength) / zoom;
+  const hazeGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, hazeR);
+  hazeGrad.addColorStop(0,    `hsla(${bloomHue}, 92%, 90%, ${alpha * 0.30})`);
+  hazeGrad.addColorStop(0.38, `hsla(${bloomHue}, 88%, 80%, ${alpha * 0.16})`);
+  hazeGrad.addColorStop(1,    `hsla(${bloomHue}, 84%, 70%, 0)`);
+  ctx.save();
+  ctx.fillStyle = hazeGrad;
+  ctx.beginPath();
+  ctx.arc(cx, cy, hazeR, 0, TAU);
+  ctx.fill();
+  ctx.restore();
+
+  // ── 2. Interference rings (two concentric, offset phases) ──────────────
+  // The two rings use hueA and hueB to make the dual-source origin legible.
+  for (let r = 0; r < 2; r++) {
+    const phase  = r * Math.PI * 0.618;     // golden-ratio phase offset
+    const pulse  = Math.sin(now * 0.0046 + phase) * 0.5 + 0.5;
+    const ringR  = (10 + 34 * pulse + r * 12) / zoom * Math.sqrt(strength);
+    const rAlpha = alpha * (0.50 - r * 0.12) * (0.45 + pulse * 0.55);
+    if (rAlpha < 0.01) continue;
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, ringR, 0, TAU);
+    ctx.strokeStyle = `hsla(${r === 0 ? hueA : hueB}, 96%, 94%, ${rAlpha})`;
+    ctx.lineWidth   = (1.6 - r * 0.3) / zoom;
+    ctx.shadowBlur  = 12 / zoom;
+    ctx.shadowColor = `hsla(${bloomHue}, 92%, 88%, ${rAlpha * 0.55})`;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // ── 3. Inner bright core ───────────────────────────────────────────────
+  const breathe  = Math.sin(now * 0.0064) * 0.5 + 0.5;
+  const coreR    = (10 + 8 * breathe) / zoom * Math.sqrt(strength);
+  const coreGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, coreR);
+  coreGrad.addColorStop(0,    `hsla(${bloomHue}, 100%, 99%, ${alpha * 0.92})`);
+  coreGrad.addColorStop(0.28, `hsla(${bloomHue},  96%, 92%, ${alpha * 0.68})`);
+  coreGrad.addColorStop(0.65, `hsla(${bloomHue},  92%, 82%, ${alpha * 0.28})`);
+  coreGrad.addColorStop(1,    `hsla(${bloomHue},  88%, 72%, 0)`);
+  ctx.save();
+  ctx.shadowBlur  = 24 / zoom;
+  ctx.shadowColor = `hsla(${bloomHue}, 96%, 92%, ${alpha * 0.52})`;
+  ctx.fillStyle   = coreGrad;
+  ctx.beginPath();
+  ctx.arc(cx, cy, coreR, 0, TAU);
+  ctx.fill();
+  ctx.restore();
+
+  // ── 4. Spiral vortex particles ─────────────────────────────────────────
+  // 20 deterministically seeded motes that orbit the collision point.
+  // Alternate hueA / hueB so the dual-source nature stays visible.
+  const nVortex  = 20;
+  const INV      = 1 / 65536;
+  const parts    = id.split("-").map(Number);
+  const seed     = ((parts[0] * 1777) ^ (parts[1] * 2311)) & 0xffff;
+  const rotSpeed = 0.00082; // rad / ms — slow continuous orbital drift
+
+  for (let k = 0; k < nVortex; k++) {
+    const hA = (seed * 1777 + k * 137) & 0xffff;
+    const hB = (seed * 2311 + k * 97)  & 0xffff;
+    const hC = (seed * 3019 + k * 211) & 0xffff;
+
+    // Evenly spread base angle with small random jitter per particle
+    const baseAngle = (k / nVortex) * TAU + (hA * INV - 0.5) * 0.52;
+    // All particles drift at the same angular rate — smooth orbit feel
+    const angle     = baseAngle + now * rotSpeed * (1 + hC * INV * 0.35);
+    // Radius oscillates to create pulsing in-out effect
+    const radBase   = 7 + 26 * (hB * INV);
+    const radPulse  = Math.sin(now * 0.0038 + k * 0.314 + hA * INV * TAU) * 0.42 + 0.58;
+    const radius    = (radBase * radPulse) / zoom * Math.sqrt(strength);
+
+    const px = cx + Math.cos(angle) * radius;
+    const py = cy + Math.sin(angle) * radius;
+
+    const twinkle = Math.sin(now * (0.0027 + hC * INV * 0.003) + k * 0.63) * 0.5 + 0.5;
+    const pAlpha  = twinkle * alpha * 0.72;
+    if (pAlpha < 0.018) continue;
+
+    const pHue = k % 2 === 0 ? hueA : hueB;
+    const pR   = (0.75 + 1.6 * (hA * INV)) / zoom;
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(px, py, pR, 0, TAU);
+    ctx.fillStyle   = `hsla(${pHue + 12}, 100%, 98%, ${pAlpha})`;
+    ctx.shadowBlur  = pR * 5;
+    ctx.shadowColor = `hsla(${bloomHue}, 94%, 94%, ${pAlpha * 0.48})`;
+    ctx.fill();
+    ctx.restore();
+  }
+};
+
 /**
  * Draw a single tide wavefront as a luminous moving ribbon.
  * Must be called INSIDE the world-space camera transform.
