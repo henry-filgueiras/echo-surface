@@ -158,6 +158,11 @@ export type ContourLoop = {
   scopeId: ScopeId | null;
   /** Set when the loop was snapped from a drawn polygon gesture */
   polygonSpec?: PolygonSpec;
+  /**
+   * Clock latch: set when this contour was created within CLOCK_LATCH_RADIUS
+   * of an active polygon loop. Sticky — never changes after creation.
+   */
+  clockLatch?: ClockLatch;
 };
 
 export type PlaybackFlash = {
@@ -722,6 +727,30 @@ export const POLYGON_FIT_MIN_SCORE = 0.18;
 // Square preference: if 4-gon score is within this fraction of 3-gon score, prefer 4.
 // Squares are harder to draw than triangles so we give them a forgiveness boost.
 export const POLYGON_SQUARE_PREFERENCE_MARGIN = 0.14;
+
+// ---------------------------------------------------------------------------
+// Clock latching — proximity-based temporal entrainment (Phase 16)
+// ---------------------------------------------------------------------------
+
+/**
+ * Immutable timing stamp written to a contour at creation time when it is
+ * born near an active polygon clock beacon.
+ */
+export type ClockLatch = {
+  /** ID of the polygon ContourLoop that is the clock source */
+  sourceLoopId: number;
+  /** Sides of the source polygon (3 | 4 | 5 | 6) */
+  sides: number;
+  /** Cycle duration in ms adopted at latch time (sides * beatMs) */
+  cycleDurationMs: number;
+};
+
+/**
+ * Proximity radius (normalised 0-1 world units) within which a new contour
+ * latches onto the nearest active polygon beacon.
+ * ~28 % of the shorter canvas dimension.
+ */
+export const CLOCK_LATCH_RADIUS = 0.28;
 
 /** Maps polygon side count to a voice role */
 export const POLYGON_SIDE_ROLE: Record<number, VoiceRole> = {

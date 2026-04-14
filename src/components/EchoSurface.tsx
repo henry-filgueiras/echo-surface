@@ -30,6 +30,7 @@ import {
   SCENE_EARLY_TRIGGER_MIN_GESTURES,
   SCENE_EARLY_TRIGGER_MIN_ROLES,
   SCENE_SEQUENCE,
+  CLOCK_LATCH_RADIUS,
   POLYGON_HALO_MIN_TRAVEL_FRAC,
   POLYGON_HALO_RADIUS_MOUSE,
   POLYGON_HALO_RADIUS_TOUCH,
@@ -70,6 +71,7 @@ import {
   type PinchTracker,
   type PlaybackFlash,
   type BindingMode,
+  type ClockLatch,
   type FilamentPulse,
   type PolygonSpec,
   type RenderedMotifSatellite,
@@ -204,6 +206,22 @@ type FilamentDragState = {
   fromLoopId: number;
   currentWorldX: number;
   currentWorldY: number;
+};
+
+/** Ephemeral visual tether shown at the moment a contour latches to a polygon clock. */
+type LatchTether = {
+  id: number;
+  bornAt: number;
+  /** Total display lifetime in ms */
+  ttl: number;
+  /** World-normalised coords of the new contour's centroid (latch receiver) */
+  fromWorldX: number;
+  fromWorldY: number;
+  /** World-normalised coords of the polygon beacon centre (clock source) */
+  toWorldX: number;
+  toWorldY: number;
+  contourHue: number;
+  beaconHue: number;
 };
 
 type GestureMode =
@@ -443,6 +461,8 @@ export function EchoSurface({
   const filamentIdRef = useRef(0);
   // Tracks last seen activeStepIndex per loop, for pulse edge-detection
   const filamentStepTrackerRef = useRef<Map<number, number>>(new Map());
+  // Ephemeral latch tethers drawn at contour-creation time (clock latching)
+  const latchTethersRef = useRef<LatchTether[]>([]);
   const cameraRef = useRef<CameraState>({
     viewCx: 0.5, viewCy: 0.5, zoom: 1,
     targetViewCx: 0.5, targetViewCy: 0.5, targetZoom: 1,
@@ -1353,6 +1373,35 @@ export function EchoSurface({
   };
 
   // ---------------------------------------------------------------------------
+  // Clock beacon detection — proximity search for active polygon loops
+  // ---------------------------------------------------------------------------
+  /**
+   * Returns the nearest active polygon ContourLoop within CLOCK_LATCH_RADIUS
+   * of (cx, cy), or null when no beacon is close enough.
+   * Only active (scheduledAtMs already reached) polygons are considered.
+   */
+  const findClockBeacon = (
+    cx: number,
+    cy: number,
+    loops: ContourLoop[],
+    now: number,
+  ): ContourLoop | null => {
+    let nearest: ContourLoop | null = null;
+    let nearestDist = CLOCK_LATCH_RADIUS;
+    for (const loop of loops) {
+      if (!loop.polygonSpec || now < loop.scheduledAtMs) continue;
+      const dx = cx - loop.polygonSpec.cx;
+      const dy = cy - loop.polygonSpec.cy;
+      const d = Math.hypot(dx, dy);
+      if (d < nearestDist) {
+        nearestDist = d;
+        nearest = loop;
+      }
+    }
+    return nearest;
+  };
+
+  // ---------------------------------------------------------------------------
   // Polygon loop spawner
   // Creates a ContourLoop whose path and anchors are regularized to an n-gon.
   // The polygon spec is kept on the loop so rendering can use the sigil mode.
@@ -1408,6 +1457,9 @@ export function EchoSurface({
     loop.noteCount = spec.sides;
     loop.desiredRegisterMidi = clamp(Math.round(77 - spec.cy * 22), 54, 84);
     loop.polygonSpec = spec;
+    // Each polygon is a genuine N-beat clock: triangle = 3 beats, square = 4,
+    // pentagon = 5, hexagon = 6.  loopBars is stored as a fraction of a 4/4 bar.
+    loop.loopBars = spec.sides / BEATS_PER_BAR;
 
     loop = registerLoopInMotifMemory({
       loop,
@@ -1718,6 +1770,67 @@ export function EchoSurface({
     if (scopeForGesture) {
       scopeForGesture.loopIds.push(sourceLoop.id);
     }
+
+    // ── Clock latching: adopt timing from nearest polygon clock beacon ─────
+    // Look for the nearest active polygon loop within CLOCK_LATCH_RADIUS.
+    // If found, the contour inherits the beacon's N-beat cycle duration and
+    // phase-aligns its scheduledAtMs to the beacon's next cycle boundary.
+    // This latch is sticky — never changed after creation.
+    {
+      const beacon = findClockBeacon(
+        gestureCentroid.x, gestureCentroid.y,
+        simulationRef.current.loops, now,
+      );
+      if (beacon?.polygonSpec) {
+        const bSpec = beacon.polygonSpec;
+        // Resolve the beacon's own harmonic context for correct BPM
+        const beaconCtx = resolveEffectiveScopeContext(
+          beacon.scopeId, scopesRef.current,
+          harmonicStateRef.current, sceneNameRef.current,
+        );
+        const beaconHarmonic = beaconCtx.harmonic;
+        const beaconLoopBars = bSpec.sides / BEATS_PER_BAR;
+        const beaconCycleDurationMs = getBarMs(beaconHarmonic) * beaconLoopBars;
+
+        // Phase-align: schedule the contour at the beacon's next cycle start
+        const beaconElapsedMs = Math.max(0, now - beacon.scheduledAtMs);
+        const beaconCycleElapsedMs = beaconElapsedMs % beaconCycleDurationMs;
+        const nextBeaconCycleStartMs = now - beaconCycleElapsedMs + beaconCycleDurationMs;
+
+        // Stamp the latch — sticky forever
+        sourceLoop.loopBars = beaconLoopBars;
+        sourceLoop.scheduledAtMs = nextBeaconCycleStartMs;
+        sourceLoop.clockLatch = {
+          sourceLoopId: beacon.id,
+          sides: bSpec.sides,
+          cycleDurationMs: beaconCycleDurationMs,
+        } satisfies ClockLatch;
+
+        // ── Visual: ephemeral luminous tether from contour to beacon ──────
+        latchTethersRef.current.push({
+          id: loopIdRef.current * 997 + Math.round(now % 10000),
+          bornAt: now,
+          ttl: 1600,
+          fromWorldX: gestureCentroid.x,
+          fromWorldY: gestureCentroid.y,
+          toWorldX: bSpec.cx,
+          toWorldY: bSpec.cy,
+          contourHue: roleHue,
+          beaconHue: beacon.hue,
+        });
+
+        // ── Visual: one bright pulse on the source shape ("teaching" beat) ─
+        pushFlash(
+          point(bSpec.cx, bSpec.cy, now),
+          beacon.role,
+          beacon.hue,
+          1.4,
+          "bar",
+        );
+      }
+    }
+    // ── end clock latching ─────────────────────────────────────────────────
+
     const sceneVoiceWeight = SCENE_CONFIGS[effectiveScene].voiceWeight;
     const responseLoop =
       callResponseEnabledRef.current &&
@@ -2744,6 +2857,41 @@ export function EchoSurface({
               glyphBoost,
             );
           });
+
+          // ── Bonus: meter glyph for clock-latched contours ───────────────
+          // A small luminous number (3 / 4 / 5 / 6) near the contour head
+          // teaches the user which polygon clock this phrase has borrowed.
+          if (loop.clockLatch) {
+            const glyphAge   = clamp((now - loop.bornAt) / 900, 0, 1);
+            // Brief pop-in then settles to a dimmer persistent state
+            const popIn      = easeOutCubic(glyphAge);
+            const settle     = 0.28 + 0.12 * Math.sin(now * 0.0014 + loop.motionSeed);
+            const glyphAlpha = popIn * settle * (1 + cadenceGlow * 0.3);
+            if (glyphAlpha > 0.02) {
+              const headPx    = normalizedToPixels(head, size);
+              const glyphSize = Math.max(8, 11 / cam.zoom);
+              // Position: slightly above and to the right of the head
+              const gx = headPx.x + 14 / cam.zoom;
+              const gy = headPx.y - 14 / cam.zoom;
+              context.save();
+              context.globalAlpha   = glyphAlpha;
+              context.font          = `bold ${glyphSize}px "Courier New", monospace`;
+              context.textAlign     = "center";
+              context.textBaseline  = "middle";
+              context.shadowColor   = `hsla(${loop.hue}, 90%, 88%, 0.9)`;
+              context.shadowBlur    = 7 / cam.zoom;
+              context.fillStyle     = `hsla(${loop.hue}, 70%, 90%, 0.96)`;
+              context.fillText(`${loop.clockLatch.sides}`, gx, gy);
+              // Tiny ring around the digit for extra legibility
+              context.beginPath();
+              context.arc(gx, gy, glyphSize * 0.78, 0, TAU);
+              context.strokeStyle = `hsla(${loop.hue}, 70%, 82%, ${glyphAlpha * 0.38})`;
+              context.lineWidth   = 0.9 / cam.zoom;
+              context.stroke();
+              context.restore();
+            }
+          }
+          // ── end meter glyph ─────────────────────────────────────────────
         }
 
         activeLoopSnapshots.push({
@@ -3479,6 +3627,104 @@ export function EchoSurface({
       // ================================================================
       // end scope rendering
       // ================================================================
+
+      // ── Clock-latch tether rendering ────────────────────────────────────
+      // Ephemeral glowing tethers drawn for ~1.6 s after a contour latches
+      // onto a nearby polygon clock beacon.  Drawn last so they float above
+      // all sigils / contours.
+      latchTethersRef.current = latchTethersRef.current.filter(
+        (t) => now - t.bornAt < t.ttl,
+      );
+      for (const tether of latchTethersRef.current) {
+        const age     = now - tether.bornAt;
+        const progress = clamp(age / tether.ttl, 0, 1);
+        // Envelope: fast rise (first 10 %), long decay
+        const rise  = Math.min(age / (tether.ttl * 0.10), 1);
+        const alpha = rise * (1 - progress) ** 1.4 * 0.78;
+        if (alpha < 0.01) continue;
+
+        const fromPx = {
+          x: tether.fromWorldX * size.width,
+          y: tether.fromWorldY * size.height,
+        };
+        const toPx = {
+          x: tether.toWorldX * size.width,
+          y: tether.toWorldY * size.height,
+        };
+
+        // ── Outer glow halo along the line ──────────────────────────────
+        context.save();
+        context.globalAlpha = alpha * 0.45;
+        context.lineWidth   = 6 / cam.zoom;
+        context.strokeStyle = `hsla(${tether.beaconHue}, 82%, 76%, 0.4)`;
+        context.shadowColor = `hsla(${tether.beaconHue}, 90%, 84%, 0.8)`;
+        context.shadowBlur  = 14 / cam.zoom;
+        context.beginPath();
+        context.moveTo(fromPx.x, fromPx.y);
+        context.lineTo(toPx.x, toPx.y);
+        context.stroke();
+        context.restore();
+
+        // ── Dashed inner tether ──────────────────────────────────────────
+        const dashLen = 4 / cam.zoom;
+        const gapLen  = 7 / cam.zoom;
+        context.save();
+        context.globalAlpha   = alpha;
+        context.setLineDash([dashLen, gapLen]);
+        context.lineDashOffset = -(now * 0.022);
+        context.lineWidth      = 1.5 / cam.zoom;
+        const tetherGrad = context.createLinearGradient(
+          fromPx.x, fromPx.y, toPx.x, toPx.y,
+        );
+        tetherGrad.addColorStop(0, `hsla(${tether.contourHue}, 88%, 78%, 0.7)`);
+        tetherGrad.addColorStop(1, `hsla(${tether.beaconHue},  92%, 86%, 0.95)`);
+        context.strokeStyle    = tetherGrad;
+        context.shadowColor    = `hsla(${tether.beaconHue}, 88%, 86%, 0.6)`;
+        context.shadowBlur     = 5 / cam.zoom;
+        context.beginPath();
+        context.moveTo(fromPx.x, fromPx.y);
+        context.lineTo(toPx.x, toPx.y);
+        context.stroke();
+        context.setLineDash([]);
+        context.restore();
+
+        // ── Travelling pulse: bright comet beacon → contour ─────────────
+        // Pulse completes in the first 65 % of the tether lifetime
+        const pulseT = clamp(progress / 0.65, 0, 1);
+        const pulsePx = {
+          x: lerp(toPx.x, fromPx.x, pulseT),
+          y: lerp(toPx.y, fromPx.y, pulseT),
+        };
+        const pulseAlpha = (1 - pulseT) * alpha * 1.3;
+        if (pulseAlpha > 0.02) {
+          context.save();
+          context.globalAlpha = clamp(pulseAlpha, 0, 1);
+          // Comet tail
+          const tailCount = 5;
+          for (let ti = 0; ti < tailCount; ti += 1) {
+            const tailT   = pulseT - (ti + 1) * 0.04;
+            if (tailT < 0) continue;
+            const tailPx  = {
+              x: lerp(toPx.x, fromPx.x, tailT),
+              y: lerp(toPx.y, fromPx.y, tailT),
+            };
+            const tailAlpha = ((tailCount - ti) / tailCount) * pulseAlpha * 0.5;
+            context.beginPath();
+            context.arc(tailPx.x, tailPx.y, (2.5 - ti * 0.3) / cam.zoom, 0, TAU);
+            context.fillStyle = `hsla(${tether.beaconHue}, 90%, 88%, ${tailAlpha})`;
+            context.fill();
+          }
+          // Pulse head
+          context.beginPath();
+          context.arc(pulsePx.x, pulsePx.y, 4 / cam.zoom, 0, TAU);
+          context.fillStyle  = `hsla(${tether.beaconHue}, 96%, 94%, 0.95)`;
+          context.shadowColor = `hsla(${tether.beaconHue}, 100%, 96%, 1)`;
+          context.shadowBlur  = 10 / cam.zoom;
+          context.fill();
+          context.restore();
+        }
+      }
+      // ── end latch tether rendering ──────────────────────────────────────
 
       // Close camera transform
       context.restore();

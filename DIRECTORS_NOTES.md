@@ -292,6 +292,7 @@ At the moment, EchoSurface is roughly:
 - a geometric ritual field where drawn polygon shapes snap to canonical rhythmic cycles
 - a polyrhythmic ecosystem where polygon loops can be bound by resonance filaments that make rhythmic ratios visible and audible
 - a touch-first shape summoning system where long-press opens a radial palette that lets users stamp canonical rhythmic polygons without needing to draw them precisely
+- a proximity-based clock hierarchy where polygon shapes act as local time beacons and new contours drawn near them inherit the beacon's N-beat cycle and phase
 
 It is not trying to be a DAW, piano roll, or synth workstation.
 
@@ -310,6 +311,39 @@ An additional feeling worth protecting now is:
 And now, a fifth:
 
 5. "The world remembered us."
+
+A sixth, added after clock latching:
+
+6. "The shapes taught the phrases when to move."
+
+### Phase 16: Clock Latching — Proximity-Based Temporal Entrainment
+
+Canonical polygon loops are now explicit clock beacons. When a freehand contour is drawn within `CLOCK_LATCH_RADIUS` (0.28 of the shorter canvas dimension) of an active polygon shape, it latches onto that shape's timing and never lets go.
+
+**What "latching" means.** The contour adopts two things from the polygon at birth:
+
+- **Cycle duration**: `N × beatMs` — so a triangle gives a 3-beat phrase, a square a 4-beat phrase, pentagon 5-beat odd meter, hexagon compound 6. Before this, all contours cycled in one 4/4 bar regardless of nearby context. Now the polygon's meter is the dominant clock.
+- **Phase reference**: the contour's `scheduledAtMs` is set to the beacon's next cycle start, so both enter their next cycle together.
+
+**Sticky latching.** Once set at creation time, `clockLatch` never changes. The contour keeps the polygon's meter even if moved elsewhere later. The timing relationship is authored at the moment of drawing, not continuously maintained.
+
+**Polygon cycle durations were also corrected.** Previously every polygon (triangle through hexagon) looped in exactly one 4/4 bar regardless of side count. That was musically inconsistent. Polygon `loopBars` is now `sides / BEATS_PER_BAR`:
+- Triangle: `loopBars = 0.75` — 3 beats per cycle
+- Square: `loopBars = 1.00` — 4 beats per cycle (unchanged)
+- Pentagon: `loopBars = 1.25` — 5 beats per cycle
+- Hexagon: `loopBars = 1.50` — 6 beats per cycle
+
+This also makes the filament system's ratio labels (3:4, 5:4 etc.) reflect the actual cycle durations.
+
+**Visual feedback.** Two simultaneous signals at latch moment:
+1. A luminous dashed tether appears from contour centroid to polygon centre. It has an outer glow halo and a bright comet pulse that travels beacon → contour over the first 65 % of the tether's ~1.6-second life.
+2. The beacon polygon receives a bright `"bar"` flash — a one-time ceremonial pulse that teaches the user "that shape owned this moment."
+
+**Bonus: meter glyph.** Latched contours display a small glowing digit (3 / 4 / 5 / 6) near the playback head. The digit pops in with an ease-out-cubic over ~900 ms then settles to a gentle persistent pulse. A thin ring around the digit keeps it legible against busy backgrounds.
+
+**Fallback.** If no polygon is within latch radius at draw time, the contour uses the existing global clock as before. Nothing breaks.
+
+**Architecture note.** Polygon shapes are now formalized as clock sources in the codebase: the `ClockLatch` type on `ContourLoop` records the beacon ID, sides, and adopted cycle duration. The `findClockBeacon` helper does a linear search over active polygon loops and returns the nearest within radius. Future Tides work can query `clockLatch` directly to know which temporal family a contour belongs to.
 
 ### Phase 10: Scene Morphing — Macro Musical Form
 
