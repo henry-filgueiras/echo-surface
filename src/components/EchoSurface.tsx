@@ -161,6 +161,7 @@ import {
   drawPolygonLoopSigil,
   drawResonanceFilament,
   drawScopeSigil,
+  drawTasteCurrents,
   drawTideInterferenceBloom,
   drawTideWavefront,
   getTideInterferenceMod,
@@ -169,6 +170,12 @@ import {
   SIGIL_ZOOM_FULL,
   type TideInterferenceNode,
 } from "../rendering/emitters";
+import {
+  DEFAULT_TASTE_PROFILE,
+  ensureTasteCurrentField,
+  realizeContourWithTaste,
+  resolveEffectiveTasteProfile,
+} from "../music/taste";
 import {
   drawFusionGlyph,
   drawPolyline,
@@ -2821,13 +2828,46 @@ export function EchoSurface({
 
         if (loop.lastPhraseToken !== phraseToken) {
           const phraseCfg = SCENE_CONFIGS[loopScene];
-          loop.phraseNotes = buildPhraseNotes(
+          const rawNotes = buildPhraseNotes(
             loop,
             loopHarmonic,
             cycleChord,
             loop.harmonicLandingBias ?? phraseCfg.harmonicLandingTone,
             phraseCfg.restBias,
           );
+
+          // ── Taste Field realization pass ────────────────────────────────
+          const tasteProfile = resolveEffectiveTasteProfile(
+            loop.scopeId,
+            scopesRef.current,
+            DEFAULT_TASTE_PROFILE,
+          );
+          // Look up prior motif notes for repetition echo
+          const priorMotif = loop.motifId !== undefined
+            ? motifsRef.current.find((m) => m.id === loop.motifId)
+            : null;
+          const priorMotifNotes = priorMotif?.loopIds.length
+            ? simulationRef.current.loops.find(
+                (l) => l.id === priorMotif.loopIds[Math.max(0, priorMotif.loopIds.length - 2)],
+              )?.phraseNotes ?? null
+            : null;
+          // How close are we to the next bar boundary?
+          const barProgressAtCycleStart = getBarProgressAtTime(
+            loop.scheduledAtMs + cycleIndex * loopDurationMs,
+            clockStartMsRef.current,
+            loopHarmonic,
+          );
+          const loopBoundaryProximity = 1 - barProgressAtCycleStart;
+
+          loop.phraseNotes = realizeContourWithTaste({
+            notes: rawNotes,
+            anchors: loop.anchors,
+            harmonicState: loopHarmonic,
+            chordSymbol: cycleChord,
+            tasteProfile,
+            priorMotifNotes,
+            loopBoundaryProximity,
+          });
           loop.lastPhraseToken = phraseToken;
         }
 
@@ -3699,6 +3739,33 @@ export function EchoSurface({
         const motifDensity = getScopeMotifDensity(scopeAllLoops);
 
         context.save();
+
+        // ── Taste currents (visible when zoomed in / focused) ──────────────
+        if (bornProg > 0.3 && (1 - sigilWeight) > 0.1) {
+          const tasteCurrentAlpha = clamp(
+            (1 - sigilWeight) * bornProg * (isFocused ? 0.9 : 0.5),
+            0,
+            0.7,
+          );
+          if (tasteCurrentAlpha > 0.02) {
+            const tasteField = ensureTasteCurrentField(
+              scope,
+              DEFAULT_TASTE_PROFILE,
+              now,
+            );
+            drawTasteCurrents(
+              context,
+              cx,
+              cy,
+              rx,
+              ry,
+              scope.hue,
+              tasteField,
+              tasteCurrentAlpha,
+              now,
+            );
+          }
+        }
 
         // ── Sigil layer (visible when zoomed out / full-collection view) ──
         if (sigilWeight > 0.02 && bornProg > 0.1) {

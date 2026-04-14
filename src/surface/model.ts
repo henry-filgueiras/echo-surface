@@ -609,6 +609,56 @@ export type ScopeOverrides = Partial<{
   scene: SceneName;
 }>;
 
+// ---------------------------------------------------------------------------
+// Taste Field — Phase 9: stylistic realization layer between contour and playback
+// ---------------------------------------------------------------------------
+
+/**
+ * A set of musical personality biases that shape how a raw contour is
+ * realized into a phrase.  All values are normalised 0–1 unless noted.
+ *
+ * - leapBias:         0 = always step-wise, 1 = preserve raw leaps
+ * - repetitionBias:   tendency to echo prior motif fragments
+ * - syncopationBias:  push onsets toward off-beats
+ * - tensionBias:      prefer non-chord tones on weak beats (dissonance appetite)
+ * - cadenceBias:      strength of phrase-end resolution toward tonic/chord tone
+ * - contourSmoothness: amount of melodic curve smoothing applied before quantize
+ */
+export type TasteProfile = {
+  leapBias: number;
+  repetitionBias: number;
+  syncopationBias: number;
+  tensionBias: number;
+  cadenceBias: number;
+  contourSmoothness: number;
+};
+
+/**
+ * A single sample in a 2D taste current vector field, stored in normalised
+ * scope-local coordinates (0-1 within the scope's bounding box).
+ * `dx` / `dy` are normalised direction components (not necessarily unit length).
+ * `strength` ∈ [0, 1] encodes how strongly the current bends contours.
+ */
+export type TasteCurrentSample = {
+  x: number;
+  y: number;
+  dx: number;
+  dy: number;
+  strength: number;
+};
+
+/**
+ * Lazily-computed vector field for a scope.
+ * Cached on the scope and regenerated whenever the taste profile changes.
+ */
+export type TasteCurrentField = {
+  samples: TasteCurrentSample[];
+  /** Grid resolution (samples per side) */
+  resolution: number;
+  /** ms timestamp at which this field was last baked */
+  bakedAt: number;
+};
+
 /** A softly bounded elliptical musical world */
 export type ScopeRecord = {
   id: ScopeId;
@@ -626,6 +676,16 @@ export type ScopeRecord = {
   /** IDs of ContourLoops whose centroid fell inside this scope */
   loopIds: number[];
   bornAt: number;
+  /**
+   * Optional local taste profile.  When absent the global default is used.
+   * Inner scopes override outer ones (innermost wins).
+   */
+  tasteProfile?: TasteProfile;
+  /**
+   * Cached taste current vector field for rendering.
+   * Rebuilt lazily when tasteProfile changes.
+   */
+  tasteCurrentField?: TasteCurrentField;
 };
 
 /** Camera / semantic-zoom state – all in normalised 0-1 world space */

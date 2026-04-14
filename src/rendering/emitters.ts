@@ -13,6 +13,8 @@ import {
   type ResonanceFilament,
   type SceneName,
   type SurfaceSize,
+  type TasteCurrentField,
+  type TasteProfile,
   type TideWave,
   type VoiceRole,
 } from "../surface/model";
@@ -1420,5 +1422,99 @@ export const drawFilamentPreview = (
   ctx.stroke();
   ctx.setLineDash([]);
   ctx.shadowBlur = 0;
+  ctx.restore();
+};
+
+// ---------------------------------------------------------------------------
+// Taste Current Field renderer
+// ---------------------------------------------------------------------------
+
+/**
+ * Draw the "taste currents" — subtle vector-field flow lines rendered inside
+ * a scope's elliptical boundary.
+ *
+ * Each flow line starts from a seed point on a subgrid, follows the local
+ * taste current direction for a short arc, and fades out at the tips.
+ * The visual reads as a barely-there shimmer of directionality — not a
+ * control-panel element, more like wind patterns or ocean currents.
+ *
+ * @param ctx       Canvas rendering context (already in world-space pixels)
+ * @param cx        Scope centre X in pixels
+ * @param cy        Scope centre Y in pixels
+ * @param rx        Scope X semi-axis in pixels
+ * @param ry        Scope Y semi-axis in pixels
+ * @param hue       Scope hue (0–360)
+ * @param field     Baked taste current field
+ * @param alpha     Overall opacity multiplier (0–1)
+ * @param now       Current timestamp in ms (for slow animation)
+ */
+export const drawTasteCurrents = (
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  rx: number,
+  ry: number,
+  hue: number,
+  field: TasteCurrentField,
+  alpha: number,
+  now: number,
+): void => {
+  if (alpha < 0.01 || field.samples.length === 0) return;
+
+  const { samples } = field;
+
+  ctx.save();
+
+  // Clip to scope ellipse
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, rx, ry, 0, 0, TAU);
+  ctx.clip();
+
+  // Slow drift offset so the field feels alive
+  const driftPhase = now * 0.00012;
+
+  for (let i = 0; i < samples.length; i++) {
+    const sample = samples[i];
+
+    // Convert normalised field coords to screen pixels within the scope ellipse
+    // Field [0,1] → ellipse interior
+    const sx = cx + (sample.x - 0.5) * rx * 1.8;
+    const sy = cy + (sample.y - 0.5) * ry * 1.8;
+
+    // Skip if outside ellipse
+    const ex = (sx - cx) / Math.max(rx, 1);
+    const ey = (sy - cy) / Math.max(ry, 1);
+    if (ex * ex + ey * ey > 0.92) continue;
+
+    // Arrow length proportional to strength, scaled to scope
+    const baseLen = Math.min(rx, ry) * 0.14;
+    const len = baseLen * (0.4 + sample.strength * 0.6);
+
+    // Gentle animated wiggle using the slow drift phase
+    const wiggle = Math.sin(driftPhase + sample.x * 4.1 + sample.y * 3.7) * 0.18;
+    const angle = Math.atan2(sample.dy, sample.dx) + wiggle;
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+
+    const ex2 = sx + cos * len;
+    const ey2 = sy + sin * len;
+
+    const lineAlpha = alpha * sample.strength * 0.22;
+    if (lineAlpha < 0.005) continue;
+
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    ctx.lineTo(ex2, ey2);
+    ctx.strokeStyle = `hsla(${hue}, 72%, 78%, ${lineAlpha})`;
+    ctx.lineWidth = 0.8;
+    ctx.stroke();
+
+    // Small arrowhead dot at the tip
+    ctx.beginPath();
+    ctx.arc(ex2, ey2, 1.1, 0, TAU);
+    ctx.fillStyle = `hsla(${hue}, 80%, 84%, ${lineAlpha * 0.9})`;
+    ctx.fill();
+  }
+
   ctx.restore();
 };

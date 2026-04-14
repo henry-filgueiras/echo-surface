@@ -2,6 +2,9 @@ package(default_visibility = ["//visibility:public"])
 
 filegroup(
     name = "music_modules",
-    srcs = ["engine.ts"],
+    srcs = [
+        "engine.ts",
+        "taste.ts",
+    ],
 )
 

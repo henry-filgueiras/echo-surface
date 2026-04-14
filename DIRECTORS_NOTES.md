@@ -295,6 +295,7 @@ At the moment, EchoSurface is roughly:
 - a proximity-based clock hierarchy where polygon shapes act as local time beacons and new contours drawn near them inherit the beacon's N-beat cycle and phase
 - a conduction layer where large sweeping gestures spawn traveling wavefronts (tides) that visibly pass through timing fields and temporarily awaken clock halos, playback heads, and latch tethers
 - a tide interference layer where two overlapping wavefronts produce a visible collision bloom, a spiral vortex, and amplified field response at the crossing point — making simultaneous conductor gestures feel orchestrally meaningful
+- a taste field layer where each scope can hold a musical personality (leapBias, syncopationBias, cadenceBias, tensionBias, repetitionBias, contourSmoothness) that shapes phrase realization without changing what was drawn — visible as subtle flowing taste currents inside scope boundaries
 
 It is not trying to be a DAW, piano roll, or synth workstation.
 
@@ -894,6 +895,64 @@ Tides fill the missing gestural scale between phrases (small, creates a voice) a
 **Why this feature.** It adds dynamics, tempo feel, register width, and density control through pure gesture — no new UI chrome. It connects to the existing "Conductor Gestures" and "Harmonic Weather" aspirations but through embodied drawing rather than automation. It makes silence active (an ebb tide is a way of drawing toward silence). And it deepens the performance skill curve: first you learn to draw melodies, then you learn to build worlds, then you learn to conduct the weather.
 
 Full implementation specification with function signatures, threshold values, and file paths: `TIDES_SPEC.md`
+
+### Phase 11: Taste Field — Stylistic Realization Layer
+
+As of April 14, 2026.
+
+A new architectural layer sits between contour analysis and final note playback: the **Taste Field**. Where the previous pipeline was `analyzeContour → buildPhraseNotes → playback`, it is now `analyzeContour → buildPhraseNotes → realizeContourWithTaste → playback`.
+
+**Conceptual framing.** Raw contour analysis tells you the shape of a gesture — where it rises, falls, leaps, sustains. `buildPhraseNotes` maps that shape onto scale tones. But a musical personality is still missing. Two pianists playing from the same lead sheet sound different because of their taste: one favors stepwise voice leading, one reaches for leaps; one lands phrases crisply on the beat, another plays with off-beat delay; one returns to familiar motifs, another constantly diverges. The Taste Field gives each scope its own musical personality without changing what the user drew.
+
+**TasteProfile type.** Six normalised [0–1] biases define a taste:
+
+- `leapBias` — 0 = always smooth stepwise lines, 1 = preserve raw leaps from contour
+- `repetitionBias` — tendency to echo recent prior motif fragments at matching steps
+- `syncopationBias` — push note onsets toward off-beats
+- `tensionBias` — prefer non-chord tones on weak beats (dissonance appetite)
+- `cadenceBias` — strength of phrase-end resolution toward tonic/chord tone
+- `contourSmoothness` — pre-quantize melodic smoothing (neighbor averaging before scale snap)
+
+**Scope ownership.** Each `ScopeRecord` now has an optional `tasteProfile?: TasteProfile`. The inner-scope-wins resolution means a child scope can have a sharper, more dissonant taste than its parent, and loops drawn in that scope will feel that personality without any global harmonic disruption.
+
+**Realization pipeline.** `realizeContourWithTaste(ctx: TasteRealizationContext): PhraseNote[]` applies six passes in a defined order:
+
+1. **Contour smoothing** — softens sharp local pitch changes before quantization
+2. **Voice leading** — converts leaps to stepwise moves at probability `1 - leapBias`
+3. **Repetition echo** — borrows pitches from the same loop's prior motif at echoed step indices, deterministically keyed by step + midi to avoid nondeterminism
+4. **Syncopation shift** — probabilistically promotes off-beat triggers and suppresses some strong-beat triggers
+5. **Tension injection** — on non-accented non-leap steps, push toward nearest non-chord-tone scale neighbor
+6. **Cadence resolution** — in the final ~28% of steps, bias notes toward chord tones; last note always snapped if cadenceBias > 0.5
+
+**Identity invariant.** Each pass refuses changes that reverse the note's directional movement. A rising gesture stays a rising gesture. A leap that is smoothed still moves in the same direction, just by a smaller interval. This is the architectural commitment: taste shapes the phrase, the contour defines it.
+
+**Key correctness guarantee.** All output pitches remain in the current scale. No chromatic passing tones are introduced. Chord-tone snaps check against `getChordPitchClasses`; non-chord-tone injections check `buildExtendedScaleMidis`. The surface stays harmonically grounded even with high tensionBias.
+
+**Taste Currents — visual vector field.** Each scope with a taste profile (or the default profile) renders subtle "taste current" flow lines inside the scope ellipse. `bakeTasteCurrentField()` computes a 7×7 grid of (x, y, dx, dy, strength) samples where each bias contributes a flow component:
+
+- cadenceBias → rightward pull (phrase-end direction)
+- leapBias → vertical excitation proportional to distance from center
+- syncopationBias → diagonal shimmer computed from a slow time offset
+- tensionBias → radial push outward from center
+- repetitionBias → slow curl/eddy field (perpendicular rotation)
+- contourSmoothness → convergent flow toward y=0.5 horizontal axis
+
+`drawTasteCurrents()` in `emitters.ts` renders these as short animated arrows inside the scope ellipse, clipped to the ellipse boundary, at very low opacity (~0.22 × alpha). They become visible as the user zooms into a scope (sigilWeight drops, so `1 - sigilWeight` rises). They read as barely-there directionality — wind patterns or ocean currents, not UI chrome.
+
+The field is cached on the scope (`scope.tasteCurrentField`) and regenerated every 8 seconds via `ensureTasteCurrentField()`. The slow regeneration interval, combined with `now`-seeded drift phases in both `bakeTasteCurrentField` and `drawTasteCurrents`, ensures the currents look alive without flickering.
+
+**Architecture files:**
+
+- `src/music/taste.ts` — all realization logic, TasteRealizationContext, DEFAULT_TASTE_PROFILE, field baking
+- `src/surface/model.ts` — TasteProfile, TasteCurrentSample, TasteCurrentField types; `tasteProfile?` and `tasteCurrentField?` added to ScopeRecord
+- `src/rendering/emitters.ts` — `drawTasteCurrents()` added at end of file; imports TasteCurrentField and TasteProfile from model
+- `src/components/EchoSurface.tsx` — buildPhraseNotes result passed through realizeContourWithTaste before being stored; taste currents rendered inside scope loop before sigil layer
+
+**Extensibility designed-in.** The six-pass pipeline structure makes it easy to add new passes (ornament injection, microtonal nuance, register gravity) without touching existing passes. Each pass is a pure `PhraseNote[] → PhraseNote[]` transform. The TasteProfile can grow new fields with defaults that produce no change.
+
+A tenth feeling now worth protecting:
+
+10. "The phrase felt like mine but more musical than I thought I was."
 
 ## If Another Chat Picks This Up Later
 
