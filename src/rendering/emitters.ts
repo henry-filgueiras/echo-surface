@@ -619,6 +619,107 @@ export const drawPolygonLoopSigil = (
   ctx.restore();
 };
 
+/**
+ * Draws the persistent clock influence zone for an active polygon beacon.
+ *
+ * A faint circular timing-field centred on the polygon, with radius equal to
+ * CLOCK_LATCH_RADIUS (converted to pixel space by the caller).  The halo:
+ *   - Has a very faint interior radial glow tinted by the beacon's role hue
+ *   - Has a slowly drifting dashed perimeter ring that breathes at a gentle rate
+ *   - Flashes brighter on the downbeat (cycleProgress ≈ 0)
+ *   - Brightens when a live stroke enters the field (isNearest && isDrawing)
+ *   - Dims slightly when a live stroke is in a different beacon's field
+ *
+ * All coordinates are in canvas pixel space (after the camera transform).
+ * @param latchRadiusPx   CLOCK_LATCH_RADIUS × Math.min(size.width, size.height)
+ */
+export const drawClockInfluenceHaloPx = (
+  ctx: CanvasRenderingContext2D,
+  pxCx: number,
+  pxCy: number,
+  hue: number,
+  sides: number,
+  zoom: number,
+  cycleProgress: number,
+  isNearest: boolean,
+  isDrawing: boolean,
+  latchRadiusPx: number,
+  now: number,
+): void => {
+  // ── Downbeat brightness — perimeter brightens at the start of each cycle ──
+  // cycleProgress = 0 is the downbeat.  We use a sharp decay so only the
+  // first ~10 % of the cycle gets the bright flash.
+  const downbeatFlash = Math.pow(Math.max(0, 1 - cycleProgress / 0.12), 2.2);
+
+  // ── Slow breath — makes the field feel alive between downbeats ─────────────
+  // Each beacon gets a unique phase via sides-based seed so they don't pulse
+  // in lockstep when multiple halos overlap.
+  const breathHz = 0.55 + sides * 0.04;
+  const breathPhase = now * breathHz * 0.001 * TAU + sides * 1.37;
+  const breathMod   = 0.55 + 0.45 * Math.sin(breathPhase);
+
+  // ── Proximity boost — halo brightens when a live stroke is inside the field ─
+  const proximityBoost = isNearest && isDrawing ? 0.68 : 0.0;
+  const dimFactor      = isDrawing && !isNearest ? 0.42 : 1.0;
+
+  // ── Interior radial glow (very faint wash that fills the field) ───────────
+  const glowAlpha = (0.038 + downbeatFlash * 0.05 + breathMod * 0.012 + proximityBoost * 0.04) * dimFactor;
+  if (glowAlpha > 0.005) {
+    ctx.save();
+    const innerGrad = ctx.createRadialGradient(pxCx, pxCy, 0, pxCx, pxCy, latchRadiusPx);
+    innerGrad.addColorStop(0.0,  `hsla(${hue}, 72%, 72%, ${glowAlpha * 0.55})`);
+    innerGrad.addColorStop(0.55, `hsla(${hue}, 68%, 66%, ${glowAlpha * 0.28})`);
+    innerGrad.addColorStop(1.0,  `hsla(${hue}, 62%, 60%, 0)`);
+    ctx.fillStyle = glowAlpha > 0.005 ? innerGrad : "transparent";
+    ctx.beginPath();
+    ctx.arc(pxCx, pxCy, latchRadiusPx, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // ── Perimeter ring ──────────────────────────────────────────────────────────
+  // Base opacity is very low; it lifts on downbeat and proximity entry.
+  const ringBaseAlpha = 0.08 + breathMod * 0.05;
+  const ringAlpha     = (ringBaseAlpha + downbeatFlash * 0.44 + proximityBoost * 0.52) * dimFactor;
+  const ringWidth     = ((isNearest && isDrawing ? 1.6 : 1.1) + downbeatFlash * 1.2) / zoom;
+
+  if (ringAlpha > 0.01) {
+    ctx.save();
+    ctx.globalAlpha  = clamp(ringAlpha, 0, 1);
+    ctx.lineWidth    = ringWidth;
+    ctx.shadowBlur   = (isNearest && isDrawing ? 18 : 8 + downbeatFlash * 14) / zoom;
+    ctx.shadowColor  = `hsla(${hue}, 88%, 78%, ${0.5 + downbeatFlash * 0.45})`;
+    ctx.strokeStyle  = `hsla(${hue}, ${72 + downbeatFlash * 18}%, ${68 + downbeatFlash * 14}%, 1)`;
+    // Subtle dashes — evenly matched so it feels like a frequency ring, not a UI dash
+    const dashLen = Math.max(6, latchRadiusPx * 0.13) / zoom;
+    const gapLen  = dashLen * (1.6 - breathMod * 0.5);
+    ctx.setLineDash([dashLen, gapLen]);
+    // Slow rotation — the ring drifts very gently around the beacon
+    ctx.lineDashOffset = -(now * 0.009 + sides * 22);
+    ctx.beginPath();
+    ctx.arc(pxCx, pxCy, latchRadiusPx, 0, TAU);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  // ── Secondary soft inner ring at ~60 % radius — reinforces the field centre ─
+  const innerRingAlpha = (0.04 + downbeatFlash * 0.18 + proximityBoost * 0.22) * dimFactor;
+  if (innerRingAlpha > 0.01) {
+    ctx.save();
+    ctx.globalAlpha = clamp(innerRingAlpha, 0, 1);
+    ctx.lineWidth   = 0.7 / zoom;
+    ctx.strokeStyle = `hsla(${hue}, 68%, 70%, 1)`;
+    ctx.setLineDash([3 / zoom, 6 / zoom]);
+    ctx.lineDashOffset = now * 0.006 + sides * 11;
+    ctx.beginPath();
+    ctx.arc(pxCx, pxCy, latchRadiusPx * 0.6, 0, TAU);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+};
+
 // ── Bezier helpers ─────────────────────────────────────────────────────────────
 const bezierPoint = (
   t: number,

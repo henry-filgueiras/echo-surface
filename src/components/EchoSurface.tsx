@@ -150,6 +150,7 @@ import {
   midiToFrequency,
 } from "../music/engine";
 import {
+  drawClockInfluenceHaloPx,
   drawFilamentPreview,
   drawMotifSigil,
   drawPolygonLoopSigil,
@@ -2455,6 +2456,81 @@ export function EchoSurface({
 
       const glyphBoost = 1 + cadenceGlow * 0.55;
 
+      // ── Clock influence halo pre-pass ─────────────────────────────────────
+      // Render the timing-field halos for all active polygon beacons FIRST so
+      // they sit underneath sigils and contours.  The halos teach the user
+      // where rhythm gravity lives without any explicit UI chrome.
+      //
+      // We also pre-compute which beacon (if any) the live stroke head is
+      // currently inside, so the halo pass can apply proximity brightening and
+      // the live-touch section can show a preview tether + meter glyph.
+      let _nearestBeaconForProximity: ContourLoop | null = null;
+      {
+        const minDim = Math.min(size.width, size.height);
+        const latchRadiusPx = CLOCK_LATCH_RADIUS * minDim;
+
+        // Find the live stroke head (first active touch, if any)
+        let liveHeadNormX: number | null = null;
+        let liveHeadNormY: number | null = null;
+        for (const touch of state.activeTouches.values()) {
+          const head = touch.points.at(-1);
+          if (head) {
+            liveHeadNormX = head.x;
+            liveHeadNormY = head.y;
+            break;
+          }
+        }
+        const isDrawing = liveHeadNormX !== null;
+
+        // Find the nearest polygon beacon to the current stroke head
+        let nearestBeaconIdForHalo: number | null = null;
+        if (liveHeadNormX !== null && liveHeadNormY !== null) {
+          let minDist = CLOCK_LATCH_RADIUS;
+          for (const loop of state.loops) {
+            if (!loop.polygonSpec || now < loop.scheduledAtMs) continue;
+            const dx = liveHeadNormX - loop.polygonSpec.cx;
+            const dy = liveHeadNormY - loop.polygonSpec.cy;
+            const d = Math.hypot(dx, dy);
+            if (d < minDist) {
+              minDist = d;
+              nearestBeaconIdForHalo = loop.id;
+              _nearestBeaconForProximity = loop;
+            }
+          }
+        }
+
+        // Render one halo per active polygon loop
+        for (const loop of state.loops) {
+          if (!loop.polygonSpec || now < loop.scheduledAtMs) continue;
+          const bSpec = loop.polygonSpec;
+          const pxCx = bSpec.cx * size.width;
+          const pxCy = bSpec.cy * size.height;
+
+          // Compute cycle progress for this loop using its own harmonic context
+          const bLoopCtx = resolveEffectiveScopeContext(
+            loop.scopeId, scopesRef.current, harmonic, sceneNameRef.current,
+          );
+          const bLoopDurationMs = getBarMs(bLoopCtx.harmonic) * loop.loopBars;
+          const bElapsed = Math.max(0, now - loop.scheduledAtMs);
+          const bCycleProgress = clamp((bElapsed % bLoopDurationMs) / bLoopDurationMs, 0, 0.9999);
+
+          drawClockInfluenceHaloPx(
+            context,
+            pxCx,
+            pxCy,
+            loop.hue,
+            bSpec.sides,
+            cam.zoom,
+            bCycleProgress,
+            loop.id === nearestBeaconIdForHalo,
+            isDrawing,
+            latchRadiusPx,
+            now,
+          );
+        }
+      }
+      // ── end clock influence halo pre-pass ─────────────────────────────────
+
       state.flashes = state.flashes.filter((flash) => now - flash.bornAt < flash.ttl);
 
       state.flashes.forEach((flash) => {
@@ -3289,6 +3365,84 @@ export function EchoSurface({
           }
         }
         // ── end closure halo ─────────────────────────────────────────────────
+
+        // ── Clock proximity preview: tether + meter glyph ────────────────────
+        // When the live stroke head is inside a clock beacon's latch field we
+        // show a faint preview tether from the beacon to the stroke head and a
+        // transient meter-glyph (3/4/5/6) floating near the head. This is
+        // purely anticipatory — it disappears the moment the contour is finalised.
+        const beaconForPreview = _nearestBeaconForProximity;
+        if (beaconForPreview?.polygonSpec) {
+          const bSpec   = beaconForPreview.polygonSpec;
+          const head    = touch.points.at(-1);
+          if (head) {
+            const beaconPx = { x: bSpec.cx * size.width, y: bSpec.cy * size.height };
+            const headPx   = normalizedToPixels(head, size);
+            const dx = head.x - bSpec.cx;
+            const dy = head.y - bSpec.cy;
+            const normDist = Math.hypot(dx, dy);
+
+            // Tether alpha: fades as the stroke moves deeper into the field
+            // (strong near the field edge, softer near centre)
+            const edgeProximity = clamp(normDist / CLOCK_LATCH_RADIUS, 0, 1);
+            const tetherAlpha = 0.1 + edgeProximity * 0.42;
+
+            // ── Preview tether line (beacon centre → stroke head) ─────────────
+            context.save();
+            context.globalAlpha = tetherAlpha;
+            context.setLineDash([3 / cam.zoom, 6 / cam.zoom]);
+            context.lineDashOffset = -(now * 0.016);
+            context.lineWidth   = 1.1 / cam.zoom;
+            const tetherGrad = context.createLinearGradient(
+              beaconPx.x, beaconPx.y, headPx.x, headPx.y,
+            );
+            tetherGrad.addColorStop(0, `hsla(${beaconForPreview.hue}, 90%, 82%, 0.8)`);
+            tetherGrad.addColorStop(1, `hsla(${liveHue}, 88%, 86%, 0.3)`);
+            context.strokeStyle = tetherGrad;
+            context.shadowBlur  = 6 / cam.zoom;
+            context.shadowColor = `hsla(${beaconForPreview.hue}, 88%, 80%, 0.5)`;
+            context.beginPath();
+            context.moveTo(beaconPx.x, beaconPx.y);
+            context.lineTo(headPx.x,   headPx.y);
+            context.stroke();
+            context.setLineDash([]);
+            context.restore();
+
+            // ── Meter glyph near head (3 / 4 / 5 / 6) ───────────────────────
+            // Pulses gently at the beacon's cycle rate so it feels live.
+            const bLoopCtxPrev = resolveEffectiveScopeContext(
+              beaconForPreview.scopeId, scopesRef.current, harmonic, sceneNameRef.current,
+            );
+            const bLoopMsPreview = getBarMs(bLoopCtxPrev.harmonic) * beaconForPreview.loopBars;
+            const bElapsedPreview = Math.max(0, now - beaconForPreview.scheduledAtMs);
+            const bCyclePreview   = (bElapsedPreview % bLoopMsPreview) / bLoopMsPreview;
+            const meterPulse  = 0.55 + 0.45 * Math.cos(bCyclePreview * TAU);
+            const meterAlpha  = clamp((0.38 + meterPulse * 0.38) * tetherAlpha * 2.2, 0, 0.88);
+            const meterSize   = Math.max(9, 13 / cam.zoom);
+            // Offset glyph slightly above-right of the stroke head
+            const gx = headPx.x + 18 / cam.zoom;
+            const gy = headPx.y - 18 / cam.zoom;
+            if (meterAlpha > 0.06) {
+              context.save();
+              context.globalAlpha   = meterAlpha;
+              context.font          = `bold ${meterSize}px "Courier New", monospace`;
+              context.textAlign     = "center";
+              context.textBaseline  = "middle";
+              context.shadowColor   = `hsla(${beaconForPreview.hue}, 94%, 88%, 0.9)`;
+              context.shadowBlur    = 8 / cam.zoom;
+              context.fillStyle     = `hsla(${beaconForPreview.hue}, 80%, 92%, 0.95)`;
+              context.fillText(`${bSpec.sides}`, gx, gy);
+              // Faint ring around digit
+              context.beginPath();
+              context.arc(gx, gy, meterSize * 0.82, 0, TAU);
+              context.strokeStyle = `hsla(${beaconForPreview.hue}, 72%, 78%, ${meterAlpha * 0.44})`;
+              context.lineWidth   = 0.8 / cam.zoom;
+              context.stroke();
+              context.restore();
+            }
+          }
+        }
+        // ── end clock proximity preview ───────────────────────────────────────
       }
 
       // ================================================================

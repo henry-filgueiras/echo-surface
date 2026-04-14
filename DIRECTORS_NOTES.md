@@ -345,6 +345,37 @@ This also makes the filament system's ratio labels (3:4, 5:4 etc.) reflect the a
 
 **Architecture note.** Polygon shapes are now formalized as clock sources in the codebase: the `ClockLatch` type on `ContourLoop` records the beacon ID, sides, and adopted cycle duration. The `findClockBeacon` helper does a linear search over active polygon loops and returns the nearest within radius. Future Tides work can query `clockLatch` directly to know which temporal family a contour belongs to.
 
+### Phase 16.5: Clock Influence Halos — Latch Field Readability Pass
+
+A focused visual polish pass on the clock latching system to make timing fields self-teaching without adding any UI chrome.
+
+**Influence Halo.** Every active polygon loop now renders a persistent faint halo at its `CLOCK_LATCH_RADIUS` (0.28 of the shorter canvas dimension). The halo has:
+- A very soft interior radial glow (low-opacity, fully transparent at the edge)
+- A slowly drifting dashed perimeter ring that breathes at a polygon-specific rate (`0.55 + sides × 0.04` Hz) so overlapping halos feel independently alive
+- A bright perimeter flash on each cycle's downbeat (`cycleProgress ≈ 0`)
+- Color tinted by the polygon's role hue
+
+This is rendered as a pre-pass inside the world-space camera transform, before the sigils and contours, so the fields sit beneath all other content like a floor glow.
+
+**Proximity Feedback During Draw.** While a live stroke is in progress and the stroke head enters a beacon's latch field:
+- The beacon's halo brightens and widens at its perimeter (the `isNearest && isDrawing` path in `drawClockInfluenceHaloPx`)
+- A faint dashed preview tether appears from the beacon centre to the live stroke head — gradient from beacon hue to stroke hue, with a slow animated dash offset
+- A transient meter glyph (3 / 4 / 5 / 6) floats near the stroke head, pulsing at the beacon's cycle rate so it feels like a live invitation rather than a tooltip
+- Non-nearest beacons dim slightly while drawing to focus attention
+
+**Field Overlap Readability.** When multiple latch fields overlap on screen:
+- Interior glows blend naturally (additive canvas alpha compositing)
+- The nearest beacon to the live stroke gets full brightness; others reduce to `0.42×` opacity
+- Only one preview tether is ever visible at a time (nearest beacon wins)
+
+**Implementation.** `drawClockInfluenceHaloPx` in `emitters.ts` handles all halo rendering. The EchoSurface render loop runs a halo pre-pass immediately after applying the camera transform, computing the nearest beacon to the live stroke head before iterating over all active polygon loops. The `_nearestBeaconForProximity` local variable threads the nearest-beacon result into the live-touch rendering section that already existed, adding the preview tether and meter glyph after the existing closure halo block.
+
+**Key constraint maintained.** No toolbars, labels, or debug UI introduced. Every element (interior glow, pulsing ring, tether, digit) is diegetic — it reads as emanation from the shape, not annotation over it.
+
+A seventh feeling now worth protecting:
+
+7. "I could feel where the beat lives before I drew the phrase."
+
 ### Phase 10: Scene Morphing — Macro Musical Form
 
 The surface now composes larger musical form over time through four named scene states:
