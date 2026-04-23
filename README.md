@@ -38,13 +38,29 @@ Then open the local Vite URL in a browser and play with the surface using mouse 
 
 ## Bootstrap
 
-This repo uses resonant-instrument-lab as a git submodule.
+### Submodules
 
-After cloning, run:
+This repo uses [`resonant-instrument-lab`](lab/resonant-instrument-lab) as a git submodule under `lab/resonant-instrument-lab/`. The submodule is the observability / intervention-atlas pipeline that the adapter's compiled worlds feed into (see below); nothing in the EchoSurface app itself depends on it at runtime.
+
+Fresh clone with the submodule in one step:
+
+```bash
+git clone --recurse-submodules <repo-url>
+```
+
+Or, if you already cloned without submodules:
 
 ```bash
 git submodule update --init --recursive
 ```
+
+To pull updates to the submodule later:
+
+```bash
+git submodule update --remote --recursive
+```
+
+### Local prerequisites
 
 ```bash
 ./bootstrap.sh
@@ -54,11 +70,27 @@ git submodule update --init --recursive
 
 ## EchoSurface → Resonant Lab Adapter
 
-The repo ships an offline compiler that turns an EchoSurface scene JSON into a [resonant-instrument-lab](lab/resonant-instrument-lab) garden config plus a provenance sidecar. The compiled world then runs through the Lab's existing `summary.json` / `atlas.json` pipeline. Spec: [`echo_adapter_v0.md`](./echo_adapter_v0.md).
+The repo ships an offline compiler that turns an EchoSurface scene JSON into a [resonant-instrument-lab](lab/resonant-instrument-lab) garden config plus a provenance sidecar. The compiled world then runs through the Lab's existing `summary.json` / `atlas.json` pipeline. This is an **offline compiler bridge only** — there is no live / bi-directional integration yet.
+
+- Spec: [`echo_adapter_v0.md`](./echo_adapter_v0.md) — the canonical design doc for the bridge. It defines scope, non-goals, the shape/contour → oscillator-cluster mapping, and the provenance contract.
+- The `lab/resonant-instrument-lab` submodule exists so the adapter has a pinned, reproducible target for its generated configs; the submodule owns its own Python venv and simulator scripts.
+
+### Proof-of-wormhole: `two_squares_one_contour`
+
+One canonical example is committed as the first end-to-end proof that the bridge works. Its story, enforced by `tests/test_adapter_canonical.py`: *two squares phase-lock, the lock is brittle, and perturbing a node in the contour-anchored left square cleanly breaks it.*
+
+| Artifact | Path |
+| --- | --- |
+| Input scene | [`examples/echo/two_squares_one_contour.json`](./examples/echo/two_squares_one_contour.json) |
+| Generated garden config | [`configs/generated/echo_two_squares.yaml`](./configs/generated/echo_two_squares.yaml) |
+| Provenance sidecar | [`configs/generated/echo_two_squares.provenance.json`](./configs/generated/echo_two_squares.provenance.json) |
+| Simulator + atlas outputs | `runs/generated/echo_two_squares/{summary,atlas,topology}.json`, `state.npz`, `audio.wav`, `atlas_audio/` (gitignored; reproducible) |
+
+Run it end-to-end:
 
 ```bash
-# end-to-end: bootstraps the submodule + its venv, compiles the canonical
-# example scene, runs the baseline sim, and builds the intervention atlas.
+# bootstraps the submodule + its venv, compiles the canonical example scene,
+# runs the baseline sim, and builds the intervention atlas.
 scripts/run_echo_pipeline.sh
 
 # or run a different scene (stem resolves under examples/echo/<stem>.json):

@@ -56,6 +56,17 @@ lab/.../scripts/build_atlas.py →  runs/generated/<name>/atlas.json
 
 ## Resolved Dragons and Pivots
 
+### 2026-04-22 — Claude Opus 4.7 (1M context) — README navigation pass for the wormhole
+
+Docs-only update to `README.md` so a reader landing on the repo can see the Resonant Lab bridge without grepping. No code, schema, or config changes.
+
+Changes:
+- Split `## Bootstrap` into two subsections: **Submodules** (explaining what `lab/resonant-instrument-lab/` is, plus `git clone --recurse-submodules`, `git submodule update --init --recursive`, and the update-later command) and **Local prerequisites** (the existing `./bootstrap.sh` note, unchanged).
+- Reworked `## EchoSurface → Resonant Lab Adapter` intro to name the bridge as an offline-compiler-only integration and to list two bullet points: what `echo_adapter_v0.md` is, and why the submodule exists (pinned/reproducible target for generated configs).
+- Added `### Proof-of-wormhole: two_squares_one_contour` subsection with the one-sentence story (phase-lock is brittle; perturbing a node in the contour-anchored left square breaks it), a 4-row artifact table (scene JSON / generated YAML / provenance JSON / runs/ outputs with gitignored note), and the existing `scripts/run_echo_pipeline.sh` + manual `compile_echo_scene.py` snippets.
+
+Explicitly deferred: no new compiler work, no live integration, no schema changes, no feature implementation, no repo reorganization. Tone kept factual; copy avoids implying a live integration exists. Story phrasing honours the 2026-04-22 wording-protocol entry below — "a node in the contour-anchored left square", not "a contour-anchored node".
+
 ### 2026-04-22 — Claude Opus 4.7 (1M context) — canonization + regression tests
 
 Locked in the legibility story from the previous tuning pass so the canonical `two_squares_one_contour` example cannot silently drift back into detector soup. Added `tests/test_adapter_canonical.py` (12 assertions) covering: deterministic compilation, lab-side config validation, the adapter fingerprint (N/K0/sigma/event count/event time/event target set), provenance's shape_to_nodes mapping and per-shape-anchoring wording, the 2-fire / 6-silent baseline detector matrix, a `phase_locked` window floor of 8 s, atlas top-1 + top-2 both on left-cluster nodes, top-1 flipping `phase_locked` FIRED → silent, top score ≥ 3× rank-5, and best right-cluster score ≤ 0.5× top. All 12 pass.
