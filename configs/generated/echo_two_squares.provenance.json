@@ -28,9 +28,9 @@
       "stride_s": 1.0
     },
     "coupling": {
-      "K0_formula": "0.8 + 0.4 * mean(shape.weight)",
-      "K0_resolved": 1.2,
-      "sigma": 0.18
+      "K0_formula": "1.6 + 0.4 * mean(shape.weight)",
+      "K0_resolved": 2.0,
+      "sigma": 0.22
     },
     "gamma_default": 0.1,
     "kind_table": {
@@ -38,42 +38,42 @@
         "base_freq_hz": 3.0,
         "cardinality": 6,
         "offsets_hz": [
-          -0.2,
-          -0.12,
-          -0.04,
-          0.04,
-          0.12,
-          0.2
+          -0.1,
+          -0.06,
+          -0.02,
+          0.02,
+          0.06,
+          0.1
         ]
       },
       "pentagon": {
         "base_freq_hz": 2.5,
         "cardinality": 5,
         "offsets_hz": [
-          -0.16,
           -0.08,
+          -0.04,
           0.0,
-          0.08,
-          0.16
+          0.04,
+          0.08
         ]
       },
       "square": {
         "base_freq_hz": 2.0,
         "cardinality": 4,
         "offsets_hz": [
-          -0.15,
-          -0.05,
-          0.05,
-          0.15
+          -0.06,
+          -0.02,
+          0.02,
+          0.06
         ]
       },
       "triangle": {
         "base_freq_hz": 3.0,
         "cardinality": 3,
         "offsets_hz": [
-          -0.1,
+          -0.04,
           0.0,
-          0.1
+          0.04
         ]
       }
     },
@@ -125,10 +125,10 @@
         3
       ],
       "offset_template_hz": [
-        -0.15,
-        -0.05,
-        0.05,
-        0.15
+        -0.06,
+        -0.02,
+        0.02,
+        0.06
       ],
       "radius": 0.1,
       "rotation_deg": 0.0,
@@ -149,10 +149,10 @@
         7
       ],
       "offset_template_hz": [
-        -0.15,
-        -0.05,
-        0.05,
-        0.15
+        -0.06,
+        -0.02,
+        0.02,
+        0.06
       ],
       "radius": 0.1,
       "rotation_deg": 0.0,

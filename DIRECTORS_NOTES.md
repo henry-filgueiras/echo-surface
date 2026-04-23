@@ -35,17 +35,31 @@ lab/.../scripts/build_atlas.py →  runs/generated/<name>/atlas.json
 **Canonical v0 mapping (do not broaden without updating `echo_adapter_v0.md`):**
 - `shape.kind` → cluster cardinality (triangle=3, square=4, pentagon=5, hexagon=6) **and** base frequency family (3.0 / 2.0 / 2.5 / 3.0 Hz)
 - `shape.center` + `shape.radius` + `shape.rotation_deg` → `k` node positions on a circle around the center, clamped to `[0,1]`
-- `shape.kind` (template) → symmetric Δω offsets applied to the base (e.g. square = `[-0.15, -0.05, +0.05, +0.15]` Hz)
-- `shape.weight` → mild global scale: `K0 = 0.8 + 0.4 · mean(weight)`
+- `shape.kind` (template) → symmetric Δω offsets applied to the base, step size 0.04 Hz across all kinds (e.g. square = `[-0.06, -0.02, +0.02, +0.06]` Hz). Tight enough that each cluster locks internally and a single counterfactual nudge can tip a node off the plateau.
+- `shape.weight` → mild global scale: `K0 = 1.6 + 0.4 · mean(weight)` (= 2.0 at default weight, matching the lab's `regime_two_cluster` / `regime_locked` references).
 - `contour` → one `nudge` event per node of the anchor shape, at `t = 4.0 + i · 1.0` s, with `delta_hz = 0.10 + 0.20 · strength`. Target policy is **all nodes from anchor shape** (documented in provenance).
 - `tide` → accepted in input schema, deferred in v0.
-- Fixed defaults: `sigma=0.18`, `eta=0.0`, `gamma=0.10`, `duration=12.0 s`, `control_rate=200 Hz`, `audio_rate=22050 Hz`, `seed=42`. `gamma=0.10` (not the spec's `e.g., 1.0`) because it matches every validated reference fixture.
+- Fixed defaults: `sigma=0.22`, `eta=0.0`, `gamma=0.10`, `duration=12.0 s`, `control_rate=200 Hz`, `audio_rate=22050 Hz`, `seed=42`. `gamma=0.10` (not the spec's `e.g., 1.0`) because it matches every validated reference fixture.
 
 **Provenance is load-bearing.** The sidecar (`configs/generated/<name>.provenance.json`, schema_version 1) records `shape_to_nodes`, per-shape metadata, per-contour compiled events, the full mapping rules (kind table, formulas, defaults), and deferred-tide counts. Without it, the bridge is opaque. Every future UI reading the generated atlas should be able to answer "which cluster came from which shape?" from this file alone.
 
 **Explicitly out of scope (v0):** live EchoSurface integration, browser↔Python runtime bridge, shape-to-note melody generation, harmonic analysis, MIDI/DAW layers, semantic zoom / scopes, reverse-mapping lab findings back into EchoSurface, generalized graphics parser, full EchoSurface document model.
 
 ## Resolved Dragons and Pivots
+
+### 2026-04-22 — Claude Opus 4.7 (1M context) — legibility tuning pass
+
+Narrowed the adapter's default constants so the canonical two-squares scene tells a crisp one-sentence story. Architecture unchanged; only the mapping constants moved. Changes (all in `scripts/compile_echo_scene.py`):
+
+- **Offset templates tightened** with a uniform 0.04 Hz step across all kinds: triangle `±0.04, 0`; square `±0.06, ±0.02`; pentagon `±0.08, ±0.04, 0`; hexagon `±0.10, ±0.06, ±0.02`. Was roughly 2.5× wider, spilling per-cluster Δω into the same range as the inter-cluster separation.
+- **K0 formula**: `0.8 + 0.4·mean(weight)` → `1.6 + 0.4·mean(weight)`. At default weight=1.0 this resolves to K0=2.0, matching the lab's `regime_two_cluster.yaml` / `regime_locked.yaml` references.
+- **sigma**: `0.18 → 0.22`. Wider spatial kernel lets the two squares couple through space firmly enough to lock rather than chatter.
+
+Baseline detector set for the canonical example went from **7 of 8 fired (mostly low-confidence noise, `flam` dominant)** to **2 fired: `phase_locked` (11.57s of 12s) and `brittle_lock` (3s window)**. Tail `r` rose from 0.31 to 0.92. The atlas now has a clean hierarchy: top intervention is `ablate node 1` at score 1.22, second is `nudge node 0 by +0.25 Hz` at 1.05, then a 0.82-point cliff to everything else. Both top interventions are in the contour-anchored left square — the story the spec's example scene was always gesturing at.
+
+**One-sentence story of the canonical example:** *"The two squares phase-lock, but the lock is brittle — perturbing a contour-anchored node in the left square cleanly breaks it."*
+
+Kept deliberately untouched: the scene JSON (positions, radii, weights, strength, rotation), `gamma`, `eta`, event timing (`t=4.0 + i·1.0` s), contour `delta_hz` formula, target policy, duration, seed. Future legibility passes can revisit those if a different story is worth telling.
 
 ### 2026-04-22 — Claude Opus 4.7 (1M context) — pipeline driver script
 

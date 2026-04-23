@@ -10,3 +10,4 @@ test-output/
 # EchoSurface → Resonant Lab adapter — simulator run artifacts are
 # reproducible from `configs/generated/*.yaml`, so don't track them.
 runs/
+scripts/__pycache__/

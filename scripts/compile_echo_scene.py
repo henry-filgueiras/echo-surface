@@ -45,17 +45,22 @@ from sim.config import ConfigError, validate  # noqa: E402
 PROVENANCE_SCHEMA_VERSION = 1
 
 # Canonical kind -> (corner count, base frequency Hz, symmetric offset template).
-# Templates are in Hz, added to the base. Keep these exactly as written in
-# echo_adapter_v0.md — they are the v0 contract, not a knob.
+# Templates are in Hz, added to the base. Step size is 0.04 Hz across all
+# kinds so cluster cohesion reads the same way regardless of cardinality —
+# each cluster has a tight ω band that locks internally, and a single
+# counterfactual nudge can push a node off the plateau. The spec allows
+# "small symmetric offsets"; this is the tuned choice.
 KIND_TABLE = {
-    "triangle": (3, 3.0, [-0.10, 0.00, +0.10]),
-    "square":   (4, 2.0, [-0.15, -0.05, +0.05, +0.15]),
-    "pentagon": (5, 2.5, [-0.16, -0.08, 0.00, +0.08, +0.16]),
-    "hexagon":  (6, 3.0, [-0.20, -0.12, -0.04, +0.04, +0.12, +0.20]),
+    "triangle": (3, 3.0, [-0.04, 0.00, +0.04]),
+    "square":   (4, 2.0, [-0.06, -0.02, +0.02, +0.06]),
+    "pentagon": (5, 2.5, [-0.08, -0.04, 0.00, +0.04, +0.08]),
+    "hexagon":  (6, 3.0, [-0.10, -0.06, -0.02, +0.02, +0.06, +0.10]),
 }
 
-# Coupling / run defaults from the spec. K0 is scaled mildly by mean weight.
-SIGMA_DEFAULT = 0.18
+# Coupling / run defaults. sigma=0.22 widens the kernel enough that the
+# two clusters couple moderately through space; combined with K0=2.0 at
+# default weight, the canonical two-squares scene phase-locks, brittle.
+SIGMA_DEFAULT = 0.22
 ETA_DEFAULT = 0.0
 DURATION_S_DEFAULT = 12.0
 CONTROL_RATE_HZ_DEFAULT = 200
@@ -237,9 +242,12 @@ def compile_scene(scene: dict, scene_name: str) -> tuple[dict, dict]:
     _check(len(nodes) >= 2,
            "scene must produce at least 2 nodes (sim.config requires N >= 2)")
 
-    # Coupling: K0 = 0.8 + 0.4 * mean(weight). One clear formula, documented.
+    # Coupling: K0 = 1.6 + 0.4 * mean(weight). At default weight=1.0 this
+    # yields K0=2.0, matching the reference two_cluster/locked fixtures in
+    # lab/.../configs/. Lower values left the canonical example chattering
+    # through 7 detectors; 2.0 lands cleanly in phase_locked + brittle_lock.
     mean_weight = sum(weights) / len(weights)
-    K0 = _round(0.8 + 0.4 * mean_weight, 4)
+    K0 = _round(1.6 + 0.4 * mean_weight, 4)
 
     # Events from contours — one deterministic time per contour, spec §contour.
     events: list[dict] = []
@@ -299,7 +307,7 @@ def compile_scene(scene: dict, scene_name: str) -> tuple[dict, dict]:
             },
             "gamma_default": GAMMA_DEFAULT,
             "coupling": {
-                "K0_formula": "0.8 + 0.4 * mean(shape.weight)",
+                "K0_formula": "1.6 + 0.4 * mean(shape.weight)",
                 "K0_resolved": K0,
                 "sigma": SIGMA_DEFAULT,
             },

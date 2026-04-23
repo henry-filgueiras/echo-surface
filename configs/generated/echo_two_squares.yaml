@@ -6,38 +6,38 @@ scene:
   N: 8
   nodes:
   - pos: [0.38, 0.5]
-    omega_0_hz: 1.85
+    omega_0_hz: 1.94
     gamma: 0.1
     voice: 0
   - pos: [0.28, 0.6]
-    omega_0_hz: 1.95
+    omega_0_hz: 1.98
     gamma: 0.1
     voice: 1
   - pos: [0.18, 0.5]
-    omega_0_hz: 2.05
+    omega_0_hz: 2.02
     gamma: 0.1
     voice: 2
   - pos: [0.28, 0.4]
-    omega_0_hz: 2.15
+    omega_0_hz: 2.06
     gamma: 0.1
     voice: 3
   - pos: [0.82, 0.5]
-    omega_0_hz: 1.85
+    omega_0_hz: 1.94
     gamma: 0.1
     voice: 4
   - pos: [0.72, 0.6]
-    omega_0_hz: 1.95
+    omega_0_hz: 1.98
     gamma: 0.1
     voice: 5
   - pos: [0.62, 0.5]
-    omega_0_hz: 2.05
+    omega_0_hz: 2.02
     gamma: 0.1
     voice: 6
   - pos: [0.72, 0.4]
-    omega_0_hz: 2.15
+    omega_0_hz: 2.06
     gamma: 0.1
     voice: 7
-  coupling: {K0: 1.2, sigma: 0.18}
+  coupling: {K0: 2.0, sigma: 0.22}
   noise: {eta: 0.0}
 run: {duration_s: 12.0, control_rate_hz: 200, audio_rate_hz: 22050, seed: 42}
 events:
