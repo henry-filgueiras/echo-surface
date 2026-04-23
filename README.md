@@ -38,6 +38,14 @@ Then open the local Vite URL in a browser and play with the surface using mouse 
 
 ## Bootstrap
 
+This repo uses resonant-instrument-lab as a git submodule.
+
+After cloning, run:
+
+```bash
+git submodule update --init --recursive
+```
+
 ```bash
 ./bootstrap.sh
 ```
