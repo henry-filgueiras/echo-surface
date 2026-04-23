@@ -20,6 +20,15 @@ Per `CLAUDE.md`, this doc is organized into **Current Canon** (present-state tru
 - `examples/echo/` — canonical input scenes. `two_squares_one_contour.json` is the first proof object.
 - `configs/generated/` — compiled outputs (YAML config + `.provenance.json` sidecar). Committed, since they are the canonical proof artifacts.
 - `runs/` — simulator outputs (`state.npz`, `audio.wav`, `summary.json`, `atlas.json`, `atlas_audio/`). Gitignored; reproducible from the committed config.
+- `tests/test_adapter_canonical.py` — regression + canonization tests for the canonical example. Protects the story contract below. Run via `lab/resonant-instrument-lab/.venv/bin/python tests/test_adapter_canonical.py`.
+
+**Canonical example story contract** (enforced by `tests/test_adapter_canonical.py`):
+- The compiler is deterministic; two runs over the same scene emit byte-identical YAML.
+- The generated config validates through `sim.config.load` and carries the exact adapter fingerprint: `N=8`, `coupling.K0=2.0`, `coupling.sigma=0.22`, four `nudge` events at `t=4.0 s` targeting the `shape_A` node set (0–3).
+- Baseline detector matrix is exactly two fires: `phase_locked` (longest window ≥ 8 s) and `brittle_lock`. The other six detectors (`drifting`, `phase_beating`, `flam`, `polyrhythmic`, `dominant_cluster`, `unstable_bridge`) stay silent.
+- Atlas top-1 and top-2 both sit in the contour-anchored left cluster (nodes 0–3). Top-1 specifically flips `phase_locked` FIRED → silent.
+- Atlas top score is ≥ 3× the rank-5 score, and the best right-cluster score is ≤ 0.5× the top. These two bounds are what "meaningful separation from the bulk" means in code.
+- **Phrasing note** (load-bearing): the contour anchors a *shape*, not individual nodes — target policy is `all_nodes_from_anchor_shape`. Copy that says "a node in the contour-anchored left square" is accurate; copy that says "a contour-anchored node" is not. `test_provenance_wording_is_precise` polices provenance text but the same care applies to docs and commit messages.
 
 **End-to-end pipeline (deterministic):**
 
@@ -46,6 +55,16 @@ lab/.../scripts/build_atlas.py →  runs/generated/<name>/atlas.json
 **Explicitly out of scope (v0):** live EchoSurface integration, browser↔Python runtime bridge, shape-to-note melody generation, harmonic analysis, MIDI/DAW layers, semantic zoom / scopes, reverse-mapping lab findings back into EchoSurface, generalized graphics parser, full EchoSurface document model.
 
 ## Resolved Dragons and Pivots
+
+### 2026-04-22 — Claude Opus 4.7 (1M context) — canonization + regression tests
+
+Locked in the legibility story from the previous tuning pass so the canonical `two_squares_one_contour` example cannot silently drift back into detector soup. Added `tests/test_adapter_canonical.py` (12 assertions) covering: deterministic compilation, lab-side config validation, the adapter fingerprint (N/K0/sigma/event count/event time/event target set), provenance's shape_to_nodes mapping and per-shape-anchoring wording, the 2-fire / 6-silent baseline detector matrix, a `phase_locked` window floor of 8 s, atlas top-1 + top-2 both on left-cluster nodes, top-1 flipping `phase_locked` FIRED → silent, top score ≥ 3× rank-5, and best right-cluster score ≤ 0.5× top. All 12 pass.
+
+The tests deliberately avoid brittle assertions: no exact confidence values, no byte-size checks on runs-directory artifacts, no full 16-rank ordering. Each assertion maps to a sentence in the story, not to a specific float.
+
+Also refined the wording protocol for the adapter. The contour anchors a *shape* (target policy: `all_nodes_from_anchor_shape`); individual nodes are not "contour-anchored". Copy like "a node in the contour-anchored left square" is accurate; "a contour-anchored node" is not. This is now called out explicitly in Current Canon and policed in provenance text by a dedicated test. Per the CLAUDE.md append-only rule on this section, the prior devlog entry's imprecise phrasing is left as-is — the protocol correction lives in Current Canon and in this entry.
+
+Tiny compiler-side change: none. The spec, constants, scene, and pipeline are unchanged; only tests + canon text were added.
 
 ### 2026-04-22 — Claude Opus 4.7 (1M context) — legibility tuning pass
 
