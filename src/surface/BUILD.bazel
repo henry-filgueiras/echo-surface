@@ -2,6 +2,6 @@ package(default_visibility = ["//visibility:public"])
 
 filegroup(
     name = "surface_modules",
-    srcs = ["model.ts", "contour.ts"],
+    srcs = ["model.ts", "contour.ts", "resonanceGhost.ts"],
 )
 

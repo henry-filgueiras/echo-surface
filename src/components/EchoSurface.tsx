@@ -114,6 +114,7 @@ import {
   point,
   samplePath,
 } from "../surface/contour";
+import { computeResonanceGhost } from "../surface/resonanceGhost";
 import {
   applyGestureFieldToPath,
   buildPolygonAnchors,
@@ -2606,6 +2607,69 @@ export function EchoSurface({
         }
       }
       // ── end clock influence halo pre-pass ─────────────────────────────────
+
+      // ── Resonance Ghost: nearest phase-lock attractor ─────────────────────
+      // Single deterministic suggestion: if two polygon clusters are close
+      // to a preferred coupling distance but not yet locked, draw a faint
+      // dashed ghost at the position that would seat the newer shape into
+      // lock with the older one. Purely visual — nothing moves until the
+      // user drags the real shape into the attractor themselves.
+      {
+        const ghost = computeResonanceGhost(state.loops, now);
+        if (ghost) {
+          const mover = state.loops.find((l) => l.id === ghost.moverLoopId);
+          const ghostHue = mover?.hue ?? 210;
+          const { sides, cx, cy, rFraction, rotation } = ghost.ghostSpec;
+          const pxCx = cx * size.width;
+          const pxCy = cy * size.height;
+          const pxR = rFraction * Math.min(size.width, size.height);
+
+          // Gentle 1.6 Hz breathing so the ghost reads as "latent, alive"
+          // without competing with the rhythmic halos next to it.
+          const breathe = 0.78 + 0.22 * Math.sin(now * 0.0026);
+          const baseAlpha = 0.34 * breathe * Math.min(1, ghost.score);
+          const lineWidth = 1.4 / cam.zoom;
+          const dashLong = 6 / cam.zoom;
+          const dashShort = 4 / cam.zoom;
+
+          context.save();
+          context.lineWidth = lineWidth;
+          context.lineJoin = "round";
+
+          // Outer attractor ring — softer, wider dashes.
+          context.strokeStyle = `hsla(${ghostHue}, 70%, 82%, ${baseAlpha * 0.55})`;
+          context.setLineDash([dashShort, dashShort * 1.6]);
+          context.lineDashOffset = -(now * 0.012) / cam.zoom;
+          context.beginPath();
+          context.arc(pxCx, pxCy, pxR * 1.32, 0, TAU);
+          context.stroke();
+
+          // Polygon ghost outline in the mover's hue, lifted toward
+          // "possibility" lightness rather than a warning tint.
+          context.strokeStyle = `hsla(${ghostHue}, 78%, 86%, ${baseAlpha})`;
+          context.setLineDash([dashLong, dashShort]);
+          context.lineDashOffset = (now * 0.018) / cam.zoom;
+          context.beginPath();
+          for (let k = 0; k <= sides; k += 1) {
+            const angle = rotation + (k / sides) * TAU;
+            const vx = pxCx + Math.cos(angle) * pxR;
+            const vy = pxCy + Math.sin(angle) * pxR;
+            if (k === 0) context.moveTo(vx, vy);
+            else context.lineTo(vx, vy);
+          }
+          context.stroke();
+
+          // Centre pip — just enough to read the attractor point.
+          context.setLineDash([]);
+          context.fillStyle = `hsla(${ghostHue}, 80%, 92%, ${baseAlpha * 0.9})`;
+          context.beginPath();
+          context.arc(pxCx, pxCy, 1.8 / cam.zoom, 0, TAU);
+          context.fill();
+
+          context.restore();
+        }
+      }
+      // ── end resonance ghost ───────────────────────────────────────────────
 
       // ── Tide wavefront rendering ───────────────────────────────────────────
       // Prune expired waves, then render each active wavefront as a luminous

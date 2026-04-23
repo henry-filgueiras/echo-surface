@@ -60,6 +60,49 @@ lab/.../scripts/build_atlas.py →  runs/generated/<name>/atlas.json
 
 ## Resolved Dragons and Pivots
 
+### 2026-04-23 — Claude Opus 4.7 (1M context) — Resonance Ghosts v1: first phase-lock attractor
+
+First pass on the Resonance Ghosts concept: when the surface can spot a small move that would bring two polygon clusters into phase-lock, draw a faint dashed ghost at the attractor position. Suggestive only — nothing moves until the user drags the real shape there themselves. This is the v1 validation of *visible semantic gravity*, not a generalised planner and not a live bridge to the Resonant Lab.
+
+**What landed.**
+- `src/surface/resonanceGhost.ts` (new, ~160 LOC) — pure deterministic heuristic with no React / canvas dependencies. Exports `computeResonanceGhost(loops, nowMs)` → `ResonanceGhost | null` plus the tuning constants (`GHOST_PREFERRED_MID`, `GHOST_LOCK_WINDOW`, `GHOST_NEAR_LOCK_RANGE`, `GHOST_MIN_SCORE`, `GHOST_MIN_MOVE`). Reuses `ContourLoop` / `PolygonSpec` from `surface/model.ts` and `clamp` from `surface/contour.ts` — no new type vocabulary.
+- `src/components/EchoSurface.tsx` — one new import and one ~55-line render block inside the main `frame()` world-space pass, slotted directly after the clock-influence halo pre-pass and before tide wavefronts. Call site calls the heuristic once per frame, no caching.
+- `src/surface/BUILD.bazel` — added `resonanceGhost.ts` to the `surface_modules` filegroup.
+
+**Heuristic — exactly what triggers a ghost.** Only active polygon loops are considered (shapes born via the polygon-detect / palette flow, past their `scheduledAtMs`). For every unordered pair (A, B):
+1. Compute centre distance `d` in normalised world units and `gap = |d − GHOST_PREFERRED_MID|` where `GHOST_PREFERRED_MID = 0.38`.
+2. If `gap ≤ GHOST_LOCK_WINDOW` (0.06) the pair is already in the lock band → skip.
+3. If `gap > GHOST_NEAR_LOCK_RANGE` (0.28) the pair is too far / too overlapping to lock with a small nudge → skip.
+4. Otherwise `score = (1 − gap/0.28) + sideCompatBonus(sidesA, sidesB)`, where the bonus is `+0.25` for matching sides and `+0.10` when `gcd(sides) > 1`. Scores below `GHOST_MIN_SCORE = 0.32` are dropped.
+5. Mover = the newer polygon (tiebreak: higher id). Anchor = the older one — it reads as the established home. Ghost centre is placed along the unit vector from anchor→mover, at distance `GHOST_PREFERRED_MID` from the anchor, clamped `[0.06, 0.94]` so it never hugs a canvas edge. If the proposed move is under `GHOST_MIN_MOVE` (0.025) the ghost is suppressed — pointing at a micro-delta reads as noise.
+6. Among all qualifying pairs only the top-scoring single ghost is returned.
+
+**Visual treatment.** Drawn inside the world-space transform, after halos and before tides. Three shapes, all in the mover's hue shifted toward "possibility" lightness (no red, no warning tint):
+- Outer attractor ring — dashed `setLineDash([4/z, 6.4/z])`, radius ≈ `1.32 × ghostR`, alpha ≈ `0.19 × score × breathe`, offset drifts clockwise at `−0.012·now/zoom`.
+- Polygon ghost outline — dashed `[6/z, 4/z]` traced over the canonical N-gon at the ghost centre, alpha ≈ `0.34 × score × breathe`, offset drifts counter-clockwise at `+0.018·now/zoom`.
+- Centre pip — 1.8 / zoom radius fill, alpha ≈ `0.31 × score × breathe`, just enough to read as "this is the attractor point".
+- `breathe = 0.78 + 0.22·sin(now·0.0026)` — a slow ~1.6 Hz pulse so the ghost reads as latent rather than static decoration.
+
+Ghost line widths and dash lengths are all divided by `cam.zoom`, same pattern as the existing sigil renderers, so semantic zoom preserves visual weight.
+
+**When ghosts appear vs. do not appear.**
+- Do *not* appear: fewer than two active polygon loops; any pair already inside the lock window; any pair too far apart for a small move to reach the band; all qualifying pairs below `GHOST_MIN_SCORE`; the winning pair's suggested move is below `GHOST_MIN_MOVE`. In all those cases nothing is drawn.
+- *Do* appear: exactly one ghost, for the single highest-scoring pair. Changes to the scene (adding/moving a polygon, polygons locking after a drag) recompute from scratch next frame and the ghost may silently disappear or relocate — no timed dismissal, no hysteresis, no memory.
+
+**Interaction with existing behaviour.** Purely additive and read-only:
+- The ghost does not mutate any `ContourLoop`, does not schedule events, does not fire filaments, does not participate in clock latching or filament drag-targeting. `getPolygonLoopHit` continues to hit-test against real `polygonSpec` centres only.
+- It is rendered *underneath* tide wavefronts, flash glyphs, loop sigils, contour retrace lines, resonance filaments, latch tethers, and screen-space overlays. Above the clock-influence halos, which lets it read as "a possibility inside the gravity field" rather than floating on top of the rhythm layer.
+- Because the ghost sits along the anchor→mover ray at `GHOST_PREFERRED_MID` from the anchor, it cannot visually overlap either source polygon (both minimum radii are much smaller than `0.38 − GHOST_LOCK_WINDOW`).
+
+**Explicitly deferred.**
+- No Python runtime bridge, no Flask/FastAPI, no browser↔simulator RPC, no live Resonant Lab execution. The heuristic is deliberately client-side only; validating whether "visible semantic gravity feels good" does not require the oracle yet.
+- No hard snap / magnetic drag toward the ghost. User agency stays intact: the ghost is a suggestion, nothing pulls.
+- No one-line "near-lock here" label. The spec marked it optional and a shape-only ghost reads cleanly in the layered canvas — a label would read as UI chrome.
+- No automatic movement of any kind. No generalised recommendation engine. No melody / harmony / note generation. No contour ↔ polygon ghosts, no scope / tide / filament suggestions — polygon ↔ polygon only.
+- No multi-ghost mode. Only one suggestion at a time, on purpose: the first pass is about whether a single attractor reads as sorcery; surfacing two simultaneous hints would dilute the signal.
+- No hysteresis / stickiness / fade-out. If the scene changes such that the ghost no longer qualifies, it disappears on the next frame.
+- No test coverage yet. The project has no JS test runner configured (only the Python adapter / pages smokes), and TypeScript + `vite build` is the current correctness signal. If the heuristic grows a second suggestion kind, that's the moment to pull in a small ts test.
+
 ### 2026-04-22 — Claude Opus 4.7 (1M context) — generated-examples visual surface
 
 Added a tiny static visual surface on the EchoSurface side so a reader can see generated adapter examples without browsing the lab's Pages site, reconstructing deep links, or initializing the submodule. Scope was kept narrow: one landing page, one committed viewer mirror, one committed run-artifact mirror for the canonical example, one build script, one smoke test. No new adapter primitives, no live integration, no schema changes, no backend, no UI redesign on the lab viewer.
