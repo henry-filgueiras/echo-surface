@@ -1,0 +1,3 @@
+[submodule "lab/resonant-instrument-lab"]
+	path = lab/resonant-instrument-lab
+	url = git@github.com:henry-filgueiras/resonant-instrument-lab.git
