@@ -56,6 +56,12 @@ lab/.../scripts/build_atlas.py →  runs/generated/<name>/atlas.json
 
 ## Resolved Dragons and Pivots
 
+### 2026-04-22 — Claude Opus 4.7 (1M context) — submodule bump: Pages-bundle smoke tests landed in the lab
+
+Bumped the `lab/resonant-instrument-lab` pointer (`51945ac → d704d8b`) to pick up a browser-smoke / public-artifact hardening pass inside the submodule. No changes on the EchoSurface side beyond the submodule pointer — the lab's `docs/` tree is the outward-facing live demo, and the smoke harness lives next to the code that produces it.
+
+The submodule's new `tests/test_docs_pages.py` asserts (stdlib-only, ~0.1 s total): `docs/index.html` presence + canonical `<title>`; the two canonical hero links verbatim (`brittle_lock` atlas with `ablate_n4` preselected, `locked` vs `two_cluster` A/B); the `docs/demo/` viewer whitelist is exact; the canonical `brittle_lock` fixture carries every browser-consumed file plus an audible baseline `audio.wav` and every audible `atlas_audio/<id>.wav`; the `.nojekyll` sentinel is present; every local href + img src + viewer-query-string URL on the landing page resolves to a file under `docs/`; and every catalogue fixture has a `summary.json`. Full breakdown is in the submodule's `DIRECTORS_NOTES.md` under the matching dated entry. No adapter-side code, config, or schema changes this pass — the EchoSurface adapter canon remains as-is.
+
 ### 2026-04-22 — Claude Opus 4.7 (1M context) — README navigation pass for the wormhole
 
 Docs-only update to `README.md` so a reader landing on the repo can see the Resonant Lab bridge without grepping. No code, schema, or config changes.
