@@ -15,7 +15,8 @@ Per `CLAUDE.md`, this doc is organized into **Current Canon** (present-state tru
 **Submodule.** `lab/resonant-instrument-lab/` is a git submodule. After cloning, run `git submodule update --init --recursive`. The submodule owns its own venv at `lab/resonant-instrument-lab/.venv/` (created by `lab/resonant-instrument-lab/run.sh` or manually via `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`).
 
 **Directory layout for the adapter:**
-- `scripts/compile_echo_scene.py` — the compiler. Reads `echo_scene.json`, writes a validated garden YAML + provenance JSON sidecar. Imports `sim.config.validate` directly from the submodule so schema drift cannot silently pass.
+- `scripts/run_echo_pipeline.sh` — end-to-end driver. Idempotent bootstrap (submodule + lab venv) followed by compile → sim → atlas. Default scene is the canonical `two_squares_one_contour`; pass a stem or `--scene PATH` for others. This is the entry point worth protecting.
+- `scripts/compile_echo_scene.py` — the compiler itself. Reads `echo_scene.json`, writes a validated garden YAML + provenance JSON sidecar. Imports `sim.config.validate` directly from the submodule so schema drift cannot silently pass.
 - `examples/echo/` — canonical input scenes. `two_squares_one_contour.json` is the first proof object.
 - `configs/generated/` — compiled outputs (YAML config + `.provenance.json` sidecar). Committed, since they are the canonical proof artifacts.
 - `runs/` — simulator outputs (`state.npz`, `audio.wav`, `summary.json`, `atlas.json`, `atlas_audio/`). Gitignored; reproducible from the committed config.
@@ -23,6 +24,9 @@ Per `CLAUDE.md`, this doc is organized into **Current Canon** (present-state tru
 **End-to-end pipeline (deterministic):**
 
 ```
+scripts/run_echo_pipeline.sh [stem]                          # one-shot driver
+
+# which expands to:
 scripts/compile_echo_scene.py  →  configs/generated/<name>.yaml + .provenance.json
 lab/.../scripts/run_sim.py     →  runs/generated/<name>/summary.json  (plus state.npz, audio.wav, topology.json)
 lab/.../scripts/build_atlas.py →  runs/generated/<name>/atlas.json
@@ -42,6 +46,10 @@ lab/.../scripts/build_atlas.py →  runs/generated/<name>/atlas.json
 **Explicitly out of scope (v0):** live EchoSurface integration, browser↔Python runtime bridge, shape-to-note melody generation, harmonic analysis, MIDI/DAW layers, semantic zoom / scopes, reverse-mapping lab findings back into EchoSurface, generalized graphics parser, full EchoSurface document model.
 
 ## Resolved Dragons and Pivots
+
+### 2026-04-22 — Claude Opus 4.7 (1M context) — pipeline driver script
+
+Baked the end-to-end command chain into `scripts/run_echo_pipeline.sh` so the compile → sim → atlas mechanism is version-controlled rather than living only in memory / docs. The script is idempotent: it initializes the submodule on first run, creates `lab/resonant-instrument-lab/.venv/` and installs `numpy + pyyaml` if missing, then runs the three stages in sequence. Default invocation uses the canonical `two_squares_one_contour` scene; a stem arg or `--scene/--name` flags route to other scenes. README and Current Canon now point at the script as the primary entry point; the raw per-stage commands remain documented for anyone who wants finer control.
 
 ### 2026-04-22 — Claude Opus 4.7 (1M context)
 

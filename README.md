@@ -57,21 +57,25 @@ git submodule update --init --recursive
 The repo ships an offline compiler that turns an EchoSurface scene JSON into a [resonant-instrument-lab](lab/resonant-instrument-lab) garden config plus a provenance sidecar. The compiled world then runs through the Lab's existing `summary.json` / `atlas.json` pipeline. Spec: [`echo_adapter_v0.md`](./echo_adapter_v0.md).
 
 ```bash
-# one-time: submodule + its venv
-git submodule update --init --recursive
-( cd lab/resonant-instrument-lab && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt )
+# end-to-end: bootstraps the submodule + its venv, compiles the canonical
+# example scene, runs the baseline sim, and builds the intervention atlas.
+scripts/run_echo_pipeline.sh
 
-# compile → simulate → atlas
+# or run a different scene (stem resolves under examples/echo/<stem>.json):
+scripts/run_echo_pipeline.sh my_scene
+scripts/run_echo_pipeline.sh --scene path/to/scene.json --name custom_out
+```
+
+Outputs land at `configs/generated/<name>.{yaml,provenance.json}` and `runs/generated/<name>/{summary,atlas}.json`.
+
+If you prefer to drive each stage yourself, the compiler is plain Python:
+
+```bash
 lab/resonant-instrument-lab/.venv/bin/python scripts/compile_echo_scene.py \
     --scene examples/echo/two_squares_one_contour.json \
     --out configs/generated/echo_two_squares.yaml \
     --provenance configs/generated/echo_two_squares.provenance.json
-
-( cd lab/resonant-instrument-lab && \
-  .venv/bin/python scripts/run_sim.py --config ../../configs/generated/echo_two_squares.yaml \
-      --out ../../runs/generated/echo_two_squares --summary --summary-json && \
-  .venv/bin/python scripts/build_atlas.py --config ../../configs/generated/echo_two_squares.yaml \
-      --baseline-dir ../../runs/generated/echo_two_squares )
+# it prints the exact run_sim.py / build_atlas.py follow-up commands.
 ```
 
 The compiler is intentionally narrow: shapes become local oscillator clusters, contours become scheduled perturbations, everything else is deferred.
