@@ -227,6 +227,33 @@ type FilamentDragState = {
   currentWorldY: number;
 };
 
+/**
+ * Three-mode "grip" state that gates how pointer events are interpreted.
+ *
+ *   place — default authoring: draw contours, long-press for shape palette.
+ *   link  — relationship editing: tap a polygon to start a filament drag.
+ *   guide — tune structure: tap a polygon to select, drag to move its centre.
+ *
+ * Movement of existing polygons exists ONLY in guide mode — the whole point
+ * of the three-mode split is that placing and tuning don't collide.
+ */
+export type UiMode = "place" | "link" | "guide";
+
+/**
+ * In-flight polygon translation gesture (guide mode only). The pointer's
+ * world-space offset from the polygon centre is captured at pickup so the
+ * grab point stays under the finger for the whole drag.
+ */
+type PolygonDragState = {
+  pointerId: number;
+  loopId: number;
+  offsetX: number;       // polygonCx - pointerWorldX at pickup
+  offsetY: number;       // polygonCy - pointerWorldY at pickup
+  startScreenX: number;  // for distance-threshold "is this actually a drag" check
+  startScreenY: number;
+  dragging: boolean;     // flipped to true once pointer passes GUIDE_DRAG_THRESHOLD_PX
+};
+
 /** Ephemeral visual tether shown at the moment a contour latches to a polygon clock. */
 type LatchTether = {
   id: number;
@@ -248,6 +275,7 @@ type GestureMode =
   | { kind: "musical"; pointerId: number }
   | { kind: "motif-drag"; pointerId: number }
   | { kind: "filament-drag"; pointerId: number }
+  | { kind: "polygon-drag"; pointerId: number }
   | {
       kind: "camera";
       id0: number; // first pointer
@@ -282,6 +310,11 @@ type GestureMode =
 // ---------------------------------------------------------------------------
 const LONG_PRESS_MS = 480;
 const LONG_PRESS_MOVE_CANCEL_PX = 14;
+
+// Guide mode: polygon-drag must move past this many CSS pixels before it
+// commits to "dragging" (vs a simple select-tap). Matches MOTIF_DRAG_THRESHOLD_PX
+// so the two selection gestures feel the same.
+const GUIDE_DRAG_THRESHOLD_PX = 12;
 
 const PALETTE_INNER_R = 30;
 const PALETTE_OUTER_R = 90;
@@ -480,6 +513,9 @@ export function EchoSurface({
   const motifDragRef = useRef<MotifDragState | null>(null);
   const filamentDragRef = useRef<FilamentDragState | null>(null);
   const filamentIdRef = useRef(0);
+  const polygonDragRef = useRef<PolygonDragState | null>(null);
+  const selectedPolygonIdRef = useRef<number | null>(null);
+  const uiModeRef = useRef<UiMode>("place");
   // Tracks last seen activeStepIndex per loop, for pulse edge-detection
   const filamentStepTrackerRef = useRef<Map<number, number>>(new Map());
   // Ephemeral latch tethers drawn at contour-creation time (clock latching)
@@ -516,6 +552,18 @@ export function EchoSurface({
   const [currentScene, setCurrentScene] = useState<SceneName>("verse");
   const [scopes, setScopes] = useState<ScopeRecord[]>([]);
   const [focusScopeId, setFocusScopeId] = useState<ScopeId | null>(null);
+  const [uiMode, setUiModeState] = useState<UiMode>("place");
+
+  const setUiMode = (next: UiMode) => {
+    // Abandon any in-flight gesture when the grip changes — prevents a
+    // drag started in one mode from leaking into another.
+    if (next !== "guide") {
+      polygonDragRef.current = null;
+      selectedPolygonIdRef.current = null;
+    }
+    uiModeRef.current = next;
+    setUiModeState(next);
+  };
 
   const currentChord = useMemo(
     () => getChordForBar(harmonicState.currentBar, harmonicState),
@@ -2671,6 +2719,50 @@ export function EchoSurface({
       }
       // ── end resonance ghost ───────────────────────────────────────────────
 
+      // ── Guide-mode selected-polygon ring ─────────────────────────────────
+      // Only drawn in Guide mode. A soft dashed halo slightly outside the
+      // polygon's canonical radius that reads as "this is the handle you
+      // picked up", matching the tuning (not correction) vocabulary.
+      if (uiModeRef.current === "guide" && selectedPolygonIdRef.current !== null) {
+        const selLoop = state.loops.find(
+          (l) => l.id === selectedPolygonIdRef.current && l.polygonSpec,
+        );
+        if (selLoop?.polygonSpec) {
+          const spec = selLoop.polygonSpec;
+          const pxCx = spec.cx * size.width;
+          const pxCy = spec.cy * size.height;
+          const pxR = spec.rFraction * Math.min(size.width, size.height);
+          const hue = selLoop.hue;
+          const isDragging =
+            gestureModeRef.current.kind === "polygon-drag" &&
+            polygonDragRef.current?.dragging === true;
+          const pulse = 0.82 + 0.18 * Math.sin(now * 0.0042);
+          const alpha = (isDragging ? 0.6 : 0.44) * pulse;
+
+          context.save();
+          context.lineWidth = (isDragging ? 2 : 1.5) / cam.zoom;
+          context.strokeStyle = `hsla(${hue}, 82%, 88%, ${alpha})`;
+          context.setLineDash([5 / cam.zoom, 4 / cam.zoom]);
+          context.lineDashOffset = -(now * 0.016) / cam.zoom;
+          context.beginPath();
+          context.arc(pxCx, pxCy, pxR * 1.2, 0, TAU);
+          context.stroke();
+
+          // Centre crosshair dot to sell "this is the handle" without
+          // competing with the polygon's own sigil detail.
+          context.setLineDash([]);
+          context.fillStyle = `hsla(${hue}, 82%, 94%, ${alpha * 0.9})`;
+          context.beginPath();
+          context.arc(pxCx, pxCy, 2.2 / cam.zoom, 0, TAU);
+          context.fill();
+          context.restore();
+        } else if (selectedPolygonIdRef.current !== null) {
+          // Loop went away (e.g. MAX_LOOPS evicted it); clear the stale selection.
+          selectedPolygonIdRef.current = null;
+        }
+      }
+      // ── end guide selected ring ──────────────────────────────────────────
+
       // ── Tide wavefront rendering ───────────────────────────────────────────
       // Prune expired waves, then render each active wavefront as a luminous
       // ribbon inside the world-space camera transform.
@@ -4308,59 +4400,108 @@ export function EchoSurface({
     const screenY = event.clientY - bounds.top;
     const mode = gestureModeRef.current;
 
-    // ---- idle → motif-drag or filament-drag or musical ----
+    // ---- idle → motif-drag or filament-drag or polygon-drag or musical ----
     if (mode.kind === "idle") {
-      const motifHit = getMotifHit(screenX, screenY);
-      if (motifHit) {
-        surface.setPointerCapture(event.pointerId);
-        motifDragRef.current = {
-          pointerId: event.pointerId,
-          motifId: motifHit.motifId,
-          homeScopeId: motifHit.scopeId,
-          anchorAngle: motifHit.angle,
-          startScreenX: screenX,
-          startScreenY: screenY,
-          currentWorldX: motifHit.worldX,
-          currentWorldY: motifHit.worldY,
-          currentScreenX: screenX,
-          currentScreenY: screenY,
-          dragging: false,
-        };
-        gestureModeRef.current = { kind: "motif-drag", pointerId: event.pointerId };
-        lastInteractionAtRef.current = performance.now();
-        return;
+      const activeMode: UiMode = uiModeRef.current;
+
+      // Motif satellites are memory interactions — always available, and
+      // conceptually part of the "place" authoring grip (re-summoning
+      // memory into the scene). Only Place mode consumes the tap.
+      if (activeMode === "place") {
+        const motifHit = getMotifHit(screenX, screenY);
+        if (motifHit) {
+          surface.setPointerCapture(event.pointerId);
+          motifDragRef.current = {
+            pointerId: event.pointerId,
+            motifId: motifHit.motifId,
+            homeScopeId: motifHit.scopeId,
+            anchorAngle: motifHit.angle,
+            startScreenX: screenX,
+            startScreenY: screenY,
+            currentWorldX: motifHit.worldX,
+            currentWorldY: motifHit.worldY,
+            currentScreenX: screenX,
+            currentScreenY: screenY,
+            dragging: false,
+          };
+          gestureModeRef.current = { kind: "motif-drag", pointerId: event.pointerId };
+          lastInteractionAtRef.current = performance.now();
+          return;
+        }
       }
 
-      // Tap on a filament midpoint → cycle its binding mode
-      const filamentHit = getFilamentHit(screenX, screenY);
-      if (filamentHit) {
-        const modes: BindingMode[] = ["ratio-lock", "phase-align", "call-offset"];
-        const next = modes[(modes.indexOf(filamentHit.mode) + 1) % modes.length];
-        filamentHit.mode = next;
-        lastInteractionAtRef.current = performance.now();
-        return;
+      // Filament midpoint tap cycles its binding mode — belongs to Link
+      // mode only so it doesn't fire accidentally while drawing in Place.
+      if (activeMode === "link") {
+        const filamentHit = getFilamentHit(screenX, screenY);
+        if (filamentHit) {
+          const modes: BindingMode[] = ["ratio-lock", "phase-align", "call-offset"];
+          const next = modes[(modes.indexOf(filamentHit.mode) + 1) % modes.length];
+          filamentHit.mode = next;
+          lastInteractionAtRef.current = performance.now();
+          return;
+        }
       }
 
-      // Polygon sigil → begin filament drag (connect two polygons)
+      // Polygon sigil: routing depends on the active grip.
+      //   link  → start a filament drag (connect two polygons)
+      //   guide → select + begin polygon translation drag
+      //   place → no-op (prevents accidental movement while authoring)
       const polygonHit = getPolygonLoopHit(screenX, screenY);
       if (polygonHit) {
         const cam = cameraRef.current;
         const size = sizeRef.current;
         const worldNormX = (screenX / size.width - 0.5) / cam.zoom + cam.viewCx;
         const worldNormY = (screenY / size.height - 0.5) / cam.zoom + cam.viewCy;
-        surface.setPointerCapture(event.pointerId);
-        filamentDragRef.current = {
-          pointerId: event.pointerId,
-          fromLoopId: polygonHit.id,
-          currentWorldX: worldNormX,
-          currentWorldY: worldNormY,
-        };
-        gestureModeRef.current = { kind: "filament-drag", pointerId: event.pointerId };
-        lastInteractionAtRef.current = performance.now();
+
+        if (activeMode === "link") {
+          surface.setPointerCapture(event.pointerId);
+          filamentDragRef.current = {
+            pointerId: event.pointerId,
+            fromLoopId: polygonHit.id,
+            currentWorldX: worldNormX,
+            currentWorldY: worldNormY,
+          };
+          gestureModeRef.current = { kind: "filament-drag", pointerId: event.pointerId };
+          lastInteractionAtRef.current = performance.now();
+          return;
+        }
+
+        if (activeMode === "guide") {
+          const spec = polygonHit.polygonSpec as PolygonSpec;
+          surface.setPointerCapture(event.pointerId);
+          polygonDragRef.current = {
+            pointerId: event.pointerId,
+            loopId: polygonHit.id,
+            offsetX: spec.cx - worldNormX,
+            offsetY: spec.cy - worldNormY,
+            startScreenX: screenX,
+            startScreenY: screenY,
+            dragging: false,
+          };
+          selectedPolygonIdRef.current = polygonHit.id;
+          gestureModeRef.current = { kind: "polygon-drag", pointerId: event.pointerId };
+          lastInteractionAtRef.current = performance.now();
+          return;
+        }
+
+        // Place mode: swallow the tap so it doesn't drift into a drawing
+        // gesture that starts inside the polygon.
         return;
       }
 
-      // Start a single-finger musical gesture
+      // Guide-mode tap on empty canvas clears any stale selection.
+      if (activeMode === "guide") {
+        selectedPolygonIdRef.current = null;
+        return;
+      }
+
+      // Link mode: empty taps are no-ops (nothing to link to).
+      if (activeMode === "link") {
+        return;
+      }
+
+      // --- Place mode: start a single-finger musical gesture ---
       surface.setPointerCapture(event.pointerId);
       await ensureAudio();
 
@@ -4543,6 +4684,50 @@ export function EchoSurface({
       const [worldX, worldY] = screenToWorld(screenNormX, screenNormY, cameraRef.current);
       fd.currentWorldX = worldX;
       fd.currentWorldY = worldY;
+      lastInteractionAtRef.current = performance.now();
+      return;
+    }
+
+    // ---- polygon-drag (Guide mode: translate the selected polygon) ----
+    // Translation only — sides, rFraction, rotation, anchor identity, hue,
+    // scope membership, and every semantic edge (filaments, motifs, latches)
+    // are preserved. We rebuild loop.points and loop.anchors in place so
+    // every downstream consumer (sigil render, ghost heuristic, clock halo,
+    // filament endpoints) sees the new position immediately.
+    if (mode.kind === "polygon-drag" && mode.pointerId === event.pointerId) {
+      const drag = polygonDragRef.current;
+      if (!drag) return;
+      const screenX = event.clientX - bounds.left;
+      const screenY = event.clientY - bounds.top;
+
+      // Cross the drag threshold before we start mutating — lets a pure
+      // tap work as "select only".
+      if (
+        !drag.dragging &&
+        Math.hypot(screenX - drag.startScreenX, screenY - drag.startScreenY) >=
+          GUIDE_DRAG_THRESHOLD_PX
+      ) {
+        drag.dragging = true;
+      }
+      if (!drag.dragging) return;
+
+      const cam = cameraRef.current;
+      const size = sizeRef.current;
+      const worldNormX = (screenX / size.width - 0.5) / cam.zoom + cam.viewCx;
+      const worldNormY = (screenY / size.height - 0.5) / cam.zoom + cam.viewCy;
+
+      const loop = simulationRef.current.loops.find((l) => l.id === drag.loopId);
+      if (!loop?.polygonSpec) return;
+
+      const nextCx = clamp(worldNormX + drag.offsetX, 0.05, 0.95);
+      const nextCy = clamp(worldNormY + drag.offsetY, 0.05, 0.95);
+      const spec = loop.polygonSpec;
+      if (spec.cx === nextCx && spec.cy === nextCy) return;
+
+      spec.cx = nextCx;
+      spec.cy = nextCy;
+      loop.points = buildPolygonPath(spec, size.width, size.height);
+      loop.anchors = buildPolygonAnchors(spec, size.width, size.height);
       lastInteractionAtRef.current = performance.now();
       return;
     }
@@ -4774,6 +4959,14 @@ export function EchoSurface({
       return;
     }
 
+    // ---- polygon-drag ends: selection persists, position is already committed ----
+    if (mode.kind === "polygon-drag" && mode.pointerId === event.pointerId) {
+      polygonDragRef.current = null;
+      gestureModeRef.current = { kind: "idle" };
+      releaseCapture(surface, event.pointerId);
+      return;
+    }
+
     // ---- palette-open: releasing over a wedge stamps the shape ----
     if (mode.kind === "palette-open" && mode.pointerId === event.pointerId) {
       if (mode.hoveredSides !== null) {
@@ -4828,6 +5021,13 @@ export function EchoSurface({
 
     if (mode.kind === "filament-drag" && mode.pointerId === event.pointerId) {
       filamentDragRef.current = null;
+      gestureModeRef.current = { kind: "idle" };
+      releaseCapture(surface, event.pointerId);
+      return;
+    }
+
+    if (mode.kind === "polygon-drag" && mode.pointerId === event.pointerId) {
+      polygonDragRef.current = null;
       gestureModeRef.current = { kind: "idle" };
       releaseCapture(surface, event.pointerId);
       return;
@@ -5022,6 +5222,45 @@ export function EchoSurface({
           <div className={`surface-scene-label surface-scene-label--${currentScene}`} aria-live="polite">
             {currentScene}
           </div>
+
+          {!captureMode ? (
+            <div
+              className="surface-mode-strip"
+              role="radiogroup"
+              aria-label="Interaction grip"
+              onClick={stopSurfaceGesture}
+              onPointerCancel={stopSurfaceGesture}
+              onPointerDown={stopSurfaceGesture}
+              onPointerMove={stopSurfaceGesture}
+              onPointerUp={stopSurfaceGesture}
+            >
+              {(["place", "link", "guide"] as const).map((modeName) => (
+                <button
+                  key={modeName}
+                  className={`surface-mode-chip${
+                    uiMode === modeName ? " surface-mode-chip--active" : ""
+                  } surface-mode-chip--${modeName}`}
+                  type="button"
+                  role="radio"
+                  aria-checked={uiMode === modeName}
+                  title={
+                    modeName === "place"
+                      ? "Place: draw contours and stamp shapes"
+                      : modeName === "link"
+                        ? "Link: connect polygons with filaments"
+                        : "Guide: drag polygon centres toward the ghost"
+                  }
+                  onClick={() => setUiMode(modeName)}
+                >
+                  {modeName === "place"
+                    ? "Place"
+                    : modeName === "link"
+                      ? "Link"
+                      : "Guide"}
+                </button>
+              ))}
+            </div>
+          ) : null}
 
           {focusScopeId !== null && (() => {
             const focusedScope = scopes.find(s => s.id === focusScopeId);

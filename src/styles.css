@@ -224,6 +224,7 @@ h2 {
 .surface-progression-strip,
 .surface-role-palette,
 .surface-controls,
+.surface-mode-strip,
 .surface-whisper {
   position: absolute;
   z-index: 2;
@@ -388,6 +389,65 @@ h2 {
   border-color: rgba(114, 208, 200, 0.22);
   color: rgba(225, 250, 247, 0.92);
   box-shadow: 0 0 18px rgba(114, 208, 200, 0.12);
+}
+
+/* ── Mode grip: Place / Link / Guide ────────────────────────────────────── */
+.surface-mode-strip {
+  top: 6.6rem;
+  right: 1rem;
+  display: flex;
+  gap: 0.28rem;
+  padding: 0.24rem;
+  border-radius: 999px;
+  background: rgba(6, 17, 22, 0.36);
+  border: 1px solid rgba(243, 228, 206, 0.08);
+  backdrop-filter: blur(12px);
+  box-shadow:
+    0 8px 22px rgba(0, 0, 0, 0.16),
+    inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.surface-mode-chip {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: rgba(243, 233, 215, 0.6);
+  padding: 0.3rem 0.6rem;
+  border-radius: 999px;
+  cursor: pointer;
+  font-family: "Avenir Next Condensed", "Franklin Gothic Medium", "Arial Narrow", sans-serif;
+  font-size: 0.66rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  transition:
+    background-color 180ms ease,
+    color 180ms ease,
+    border-color 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.surface-mode-chip:hover {
+  color: rgba(247, 243, 234, 0.9);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.surface-mode-chip--active {
+  color: rgba(247, 243, 234, 0.96);
+  background: rgba(114, 208, 200, 0.12);
+  border-color: rgba(114, 208, 200, 0.26);
+  box-shadow: 0 0 14px rgba(114, 208, 200, 0.14);
+}
+
+.surface-mode-chip--guide.surface-mode-chip--active {
+  background: hsla(248, 84%, 72%, 0.14);
+  border-color: hsla(248, 84%, 78%, 0.3);
+  box-shadow: 0 0 14px hsla(248, 84%, 70%, 0.18);
+}
+
+.surface-mode-chip--link.surface-mode-chip--active {
+  background: hsla(176, 70%, 64%, 0.14);
+  border-color: hsla(176, 70%, 70%, 0.3);
+  box-shadow: 0 0 14px hsla(176, 70%, 66%, 0.18);
 }
 
 .surface-role-chip--active {

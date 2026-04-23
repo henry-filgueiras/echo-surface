@@ -60,6 +60,68 @@ lab/.../scripts/build_atlas.py →  runs/generated/<name>/atlas.json
 
 ## Resolved Dragons and Pivots
 
+### 2026-04-23 — Claude Opus 4.7 (1M context) — Guide Mode v1: three-grip state + polygon-centre drag
+
+Added the minimum steering wheel for Resonance Ghosts. The surface now runs in one of three exclusive "grips" — **Place** (default: draw contours, stamp shapes, re-summon motifs), **Link** (tap-polygon → filament drag; tap-filament → cycle binding), **Guide** (tap-polygon → select + translate). Movement of existing polygons only exists in Guide. Place is for creating structure, Guide is for tuning it; accidental drags in Place are now impossible by construction.
+
+**What landed.**
+- `src/components/EchoSurface.tsx` —
+  - New module-level `UiMode` type + `PolygonDragState` shape; new `polygon-drag` variant on the existing `GestureMode` union; `GUIDE_DRAG_THRESHOLD_PX = 12` (matches `MOTIF_DRAG_THRESHOLD_PX` so the two selection gestures feel the same).
+  - New `uiModeRef`, `uiMode` state + `setUiMode(next)` helper. Mode changes away from Guide drop any in-flight `polygonDragRef` and clear `selectedPolygonIdRef`, so a started-then-abandoned drag cannot leak across grips.
+  - `beginTouch` idle branch rewritten around `uiModeRef.current`. Motif satellites + contour drawing + long-press palette fire only in Place. Filament-midpoint tap and polygon→filament drag fire only in Link. Polygon tap in Guide begins `polygon-drag` (records grab-point offset + `startScreenX/Y`, sets `selectedPolygonIdRef`). Polygon tap in Place is swallowed (no drawing starts inside the sigil). Empty-canvas tap in Guide clears the selection.
+  - `moveTouch` gained a polygon-drag branch that rebuilds `loop.points = buildPolygonPath(spec, …)` and `loop.anchors = buildPolygonAnchors(spec, …)` in place after updating `spec.cx / spec.cy`. Pure translation — no side count, no radius, no rotation, no hue, no scope membership, no filament or motif linkage is touched. Drag commits only after the pointer crosses `GUIDE_DRAG_THRESHOLD_PX`, so a short tap works as select-only.
+  - `endTouch` + `cancelTouch` release the polygon-drag gesture; position is already committed by the move handler, selection persists.
+  - Three-pill mode strip in the JSX (top-right, below the HUD), rendered only outside `captureMode`, with `role="radiogroup"` / per-pill `role="radio"` + `aria-checked` + tooltip so the UI is reachable without mouse hover. Reuses `stopSurfaceGesture` on every pointer event so pill taps never leak into the surface gesture stream.
+  - Render-loop extension draws a dashed "selection ring" at `1.2 × rFraction` around the selected polygon (in the mover's own hue), plus a tiny centre pip. Line widths and dashes scale by `1/cam.zoom` like every other world-space overlay. The ring brightens and thickens during an active drag (`alpha` 0.44 → 0.6, lineWidth 1.5 → 2) so the user gets physical "I'm holding it" feedback. Renders only in Guide mode and only when a selection exists. Also self-heals: if the selected loop got evicted (MAX_LOOPS), the ref is cleared next frame.
+- `src/styles.css` — new `.surface-mode-strip` + `.surface-mode-chip[--active|--place|--link|--guide]` block (~55 lines). Pill group sits inside a blurred capsule, each pill is a small uppercase radio; the active Guide pill tints violet (248°), active Link pill tints teal (176°), active Place pill stays in the neutral mint-active palette shared with `surface-mini-chip--active`. No layout shift on mode change.
+
+**Exact mode matrix (pointer routing in idle).**
+
+| Surface | Place | Link | Guide |
+|---|---|---|---|
+| Empty canvas tap | start musical gesture (→ palette on long-press) | no-op | clear selection |
+| Polygon sigil tap | no-op (prevents drag-by-draw) | begin filament drag | select + begin polygon-drag |
+| Filament midpoint tap | no-op | cycle binding mode | no-op |
+| Motif satellite tap | begin motif drag | no-op | no-op |
+| Two-finger pinch | camera (any mode) | camera | camera |
+| Wheel zoom | always on | always on | always on |
+
+Motifs are gated to Place because re-summoning memory reads as "bring it back into the scene" — authoring, not tuning. Filament-midpoint cycling is gated to Link to stay true to the "Link is relationship editing" framing; in Place it would fire accidentally during tight drawing, and in Guide it would compete with the drag gesture.
+
+**Drag heuristic.**
+- Grab-point is preserved across the drag: at pickup we record `offsetX = spec.cx − pointerWorldX` (same for Y), then on every move event `spec.cx = pointerWorldX + offsetX` — the finger keeps grabbing the same point on the polygon.
+- `spec.cx / spec.cy` are clamped to `[0.05, 0.95]` so a polygon can't be dragged off the canvas.
+- `loop.points` and `loop.anchors` are rebuilt in place every frame the drag advances (cheap: 3–7 points per polygon). Every downstream consumer — sigil render, clock-influence halo, filament endpoints, latch tether endpoints, Resonance Ghost heuristic — reads through `polygonSpec.cx/cy` or `loop.points`, so the entire scene tracks the drag without any further wiring.
+- Ghost recomputes live against the updated spec; when `gap ≤ GHOST_LOCK_WINDOW` the ghost disappears on that frame — the "click" moment without any snap, force, or special case.
+
+**What the spec asked to preserve, and how it is preserved.**
+- **Side count / radius / rotation** — `buildPolygonPath` and `buildPolygonAnchors` both take the unchanged `spec.sides` / `spec.rFraction` / `spec.rotation`; drag only overwrites `cx` / `cy`.
+- **Identity** — `loop.id` is untouched; every cross-loop reference (filaments, motif `loopIds`, scope `loopIds`, latches) continues to resolve.
+- **Contour ownership** — the loop still owns its polygon; `polygonSpec` is mutated in place rather than replaced.
+- **Semantic links** — `scopeId`, filaments, latches, `desiredRegisterMidi`, `motifId`, `hue`, `role`, `clockLatch`, `scheduledAtMs`, and `loopBars` are all left alone. Moving a polygon does not move it between scopes and does not retune it: the grounded musical identity stays anchored to the original birthplace, and only the geometry changes. (Concrete corollary: dragging a square from the upper half of the canvas to the lower half doesn't drop its pitch — pitch is the birth-cy identity, not the current-cy.)
+
+**Interaction with prior systems.**
+- **Resonance Ghosts (v1).** No change to the heuristic or render block; Guide mode only changes the *input* to `computeResonanceGhost` (the polygon positions). Dragging the newer polygon toward the ghost makes the ghost fade as the pair's distance enters the lock window, and the ghost relocates or vanishes if the drag crosses past it.
+- **Clock influence halos.** Unchanged code path; halos read `loop.polygonSpec.cx/cy` each frame so they follow the drag continuously.
+- **Resonance filaments.** `drawResonanceFilament` reads both endpoints from `polygonSpec.cx/cy`, so filaments attached to a moving polygon stretch / recontract live. Binding modes and phase-align offsets are untouched.
+- **Tide wavefronts / interference nodes.** Unaffected — tides are world-space conduction, polygon positions don't feed their kernel beyond proximity lookups that already run per-frame.
+- **Motifs.** Motif registration happens at `spawnPolygonLoop` time; moving a polygon later does not re-register it. This is intentional — motif identity is a birth-time concept.
+
+**What appears in Guide mode that doesn't in Place/Link.**
+- Dashed selection ring + centre pip around the most-recently-tapped polygon.
+- The active-pill tint in the mode strip shifts to violet so the reader can tell at a glance which grip is live.
+- No other chrome, no inspector, no handles. One ring, one pip.
+
+**Explicitly deferred.**
+- No hard snap / magnetic lock-in on Resonance Ghosts. User sovereignty is sacred; the ghost is still suggestive only. If / when a soft magnetic attractor lands, it'll be a separate dated entry — the question of what "satisfying click" should feel like is worth its own round of judgment.
+- No delete, resize, or rotate handles in Guide. Translation only. A resize handle would immediately grow into a full editor and that's explicitly off-scope.
+- No keyboard mode toggles. Would be trivial (`P` / `L` / `G`) but the spec asked for a small tasteful selector, not a power-user surface; the pills already read in <100 ms.
+- No Guide-mode drag of non-polygon loops. Freehand contours have no spec-driven centre; retrofitting "drag the centroid" would require touching the contour model. The spec lets this be.
+- No multi-select. One polygon selected at a time; a second tap moves selection.
+- No undo. Polygon-drag commits live; there's no scratch buffer. Matches the rest of the surface (drawing, scope-creation, filament-creation all commit immediately).
+- No scope re-assignment on drag. A polygon dragged across a scope boundary keeps its original `scopeId` and therefore its original harmonic context. This preserves the "musical identity is birth-time" rule above; if this ever feels wrong, the fix is one line in `moveTouch` (call `findScopeAt(cx, cy, …)`), not a framework change.
+- No test coverage. Same status as the ghost v1 entry — project still has no JS test runner; `tsc --noEmit && vite build` is the correctness signal and both pass on this pass.
+
 ### 2026-04-23 — Claude Opus 4.7 (1M context) — Resonance Ghosts v1: first phase-lock attractor
 
 First pass on the Resonance Ghosts concept: when the surface can spot a small move that would bring two polygon clusters into phase-lock, draw a faint dashed ghost at the attractor position. Suggestive only — nothing moves until the user drags the real shape there themselves. This is the v1 validation of *visible semantic gravity*, not a generalised planner and not a live bridge to the Resonant Lab.
