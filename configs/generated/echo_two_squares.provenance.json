@@ -1,0 +1,167 @@
+{
+  "contours": [
+    {
+      "anchor_shape_id": "shape_A",
+      "compiled_events": [
+        {
+          "delta_hz": 0.24,
+          "kind": "nudge",
+          "target_nodes": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "time_s": 4.0
+        }
+      ],
+      "point_count": 3,
+      "source_contour_id": "contour_1",
+      "strength": 0.7
+    }
+  ],
+  "generated_config_path": "configs/generated/echo_two_squares.yaml",
+  "mapping": {
+    "contour_event_schedule": {
+      "delta_hz_formula": "0.10 + 0.20 * strength",
+      "first_event_s": 4.0,
+      "stride_s": 1.0
+    },
+    "coupling": {
+      "K0_formula": "0.8 + 0.4 * mean(shape.weight)",
+      "K0_resolved": 1.2,
+      "sigma": 0.18
+    },
+    "gamma_default": 0.1,
+    "kind_table": {
+      "hexagon": {
+        "base_freq_hz": 3.0,
+        "cardinality": 6,
+        "offsets_hz": [
+          -0.2,
+          -0.12,
+          -0.04,
+          0.04,
+          0.12,
+          0.2
+        ]
+      },
+      "pentagon": {
+        "base_freq_hz": 2.5,
+        "cardinality": 5,
+        "offsets_hz": [
+          -0.16,
+          -0.08,
+          0.0,
+          0.08,
+          0.16
+        ]
+      },
+      "square": {
+        "base_freq_hz": 2.0,
+        "cardinality": 4,
+        "offsets_hz": [
+          -0.15,
+          -0.05,
+          0.05,
+          0.15
+        ]
+      },
+      "triangle": {
+        "base_freq_hz": 3.0,
+        "cardinality": 3,
+        "offsets_hz": [
+          -0.1,
+          0.0,
+          0.1
+        ]
+      }
+    },
+    "noise_eta": 0.0,
+    "run": {
+      "audio_rate_hz": 22050,
+      "control_rate_hz": 200,
+      "duration_s": 12.0,
+      "seed": 42
+    },
+    "target_policy": "all_nodes_from_anchor_shape"
+  },
+  "notes": [
+    "Shapes compiled to local oscillator clusters \u2014 one node per polygon corner.",
+    "Contours compiled to scheduled per-node 'nudge' events targeting all nodes of the anchor shape. Contours are NOT melodies.",
+    "Tides accepted in input schema but deferred in v0.",
+    "gamma=0.10 matches validated reference fixtures; the adapter spec suggested 1.0 as an example only."
+  ],
+  "provenance_path": "configs/generated/echo_two_squares.provenance.json",
+  "scene_name": "echo_two_squares",
+  "schema_version": 1,
+  "shape_to_nodes": {
+    "shape_A": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "shape_B": [
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  "shapes": [
+    {
+      "base_freq_hz": 2.0,
+      "center": [
+        0.28,
+        0.5
+      ],
+      "id": "shape_A",
+      "kind": "square",
+      "node_indices": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "offset_template_hz": [
+        -0.15,
+        -0.05,
+        0.05,
+        0.15
+      ],
+      "radius": 0.1,
+      "rotation_deg": 0.0,
+      "weight": 1.0
+    },
+    {
+      "base_freq_hz": 2.0,
+      "center": [
+        0.72,
+        0.5
+      ],
+      "id": "shape_B",
+      "kind": "square",
+      "node_indices": [
+        4,
+        5,
+        6,
+        7
+      ],
+      "offset_template_hz": [
+        -0.15,
+        -0.05,
+        0.05,
+        0.15
+      ],
+      "radius": 0.1,
+      "rotation_deg": 0.0,
+      "weight": 1.0
+    }
+  ],
+  "source_scene_path": "examples/echo/two_squares_one_contour.json",
+  "tides": {
+    "deferred_in_v0": true,
+    "input_count": 0
+  }
+}

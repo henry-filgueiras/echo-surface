@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "name": "echo_two_squares",
+  "canvas": { "width": 1.0, "height": 1.0 },
+
+  "shapes": [
+    {
+      "id": "shape_A",
+      "kind": "square",
+      "center": [0.28, 0.50],
+      "radius": 0.10,
+      "weight": 1.0,
+      "rotation_deg": 0.0
+    },
+    {
+      "id": "shape_B",
+      "kind": "square",
+      "center": [0.72, 0.50],
+      "radius": 0.10,
+      "weight": 1.0,
+      "rotation_deg": 0.0
+    }
+  ],
+
+  "contours": [
+    {
+      "id": "contour_1",
+      "anchor_shape_id": "shape_A",
+      "points": [[0.22, 0.54], [0.30, 0.60], [0.36, 0.48]],
+      "strength": 0.7
+    }
+  ],
+
+  "tides": []
+}

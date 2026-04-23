@@ -6,3 +6,7 @@ bazel-*
 # Zoom test tooling (puppeteer, installed on demand)
 test-tools/
 test-output/
+
+# EchoSurface → Resonant Lab adapter — simulator run artifacts are
+# reproducible from `configs/generated/*.yaml`, so don't track them.
+runs/

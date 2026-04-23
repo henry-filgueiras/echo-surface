@@ -1,0 +1,47 @@
+version: 1
+meta: {name: echo_two_squares, notes: Auto-generated from EchoSurface scene by scripts/compile_echo_scene.py
+    (echo_adapter_v0). Shapes -> local oscillator clusters; contours -> scheduled
+    nudge events. Provenance sidecar emitted alongside this YAML.}
+scene:
+  N: 8
+  nodes:
+  - pos: [0.38, 0.5]
+    omega_0_hz: 1.85
+    gamma: 0.1
+    voice: 0
+  - pos: [0.28, 0.6]
+    omega_0_hz: 1.95
+    gamma: 0.1
+    voice: 1
+  - pos: [0.18, 0.5]
+    omega_0_hz: 2.05
+    gamma: 0.1
+    voice: 2
+  - pos: [0.28, 0.4]
+    omega_0_hz: 2.15
+    gamma: 0.1
+    voice: 3
+  - pos: [0.82, 0.5]
+    omega_0_hz: 1.85
+    gamma: 0.1
+    voice: 4
+  - pos: [0.72, 0.6]
+    omega_0_hz: 1.95
+    gamma: 0.1
+    voice: 5
+  - pos: [0.62, 0.5]
+    omega_0_hz: 2.05
+    gamma: 0.1
+    voice: 6
+  - pos: [0.72, 0.4]
+    omega_0_hz: 2.15
+    gamma: 0.1
+    voice: 7
+  coupling: {K0: 1.2, sigma: 0.18}
+  noise: {eta: 0.0}
+run: {duration_s: 12.0, control_rate_hz: 200, audio_rate_hz: 22050, seed: 42}
+events:
+- {t: 4.0, type: nudge, node: 0, delta_hz: 0.24}
+- {t: 4.0, type: nudge, node: 1, delta_hz: 0.24}
+- {t: 4.0, type: nudge, node: 2, delta_hz: 0.24}
+- {t: 4.0, type: nudge, node: 3, delta_hz: 0.24}

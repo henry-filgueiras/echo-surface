@@ -52,6 +52,30 @@ git submodule update --init --recursive
 
 `bootstrap.sh` installs the local build prerequisites we use in sister projects on macOS with Homebrew, errors out on non-macOS hosts, and finishes with `npm ci`.
 
+## EchoSurface → Resonant Lab Adapter
+
+The repo ships an offline compiler that turns an EchoSurface scene JSON into a [resonant-instrument-lab](lab/resonant-instrument-lab) garden config plus a provenance sidecar. The compiled world then runs through the Lab's existing `summary.json` / `atlas.json` pipeline. Spec: [`echo_adapter_v0.md`](./echo_adapter_v0.md).
+
+```bash
+# one-time: submodule + its venv
+git submodule update --init --recursive
+( cd lab/resonant-instrument-lab && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt )
+
+# compile → simulate → atlas
+lab/resonant-instrument-lab/.venv/bin/python scripts/compile_echo_scene.py \
+    --scene examples/echo/two_squares_one_contour.json \
+    --out configs/generated/echo_two_squares.yaml \
+    --provenance configs/generated/echo_two_squares.provenance.json
+
+( cd lab/resonant-instrument-lab && \
+  .venv/bin/python scripts/run_sim.py --config ../../configs/generated/echo_two_squares.yaml \
+      --out ../../runs/generated/echo_two_squares --summary --summary-json && \
+  .venv/bin/python scripts/build_atlas.py --config ../../configs/generated/echo_two_squares.yaml \
+      --baseline-dir ../../runs/generated/echo_two_squares )
+```
+
+The compiler is intentionally narrow: shapes become local oscillator clusters, contours become scheduled perturbations, everything else is deferred.
+
 ## Bazel Targets
 
 ```bash

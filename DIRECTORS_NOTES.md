@@ -4,6 +4,61 @@ As of April 13, 2026.
 
 This file is a compact handoff artifact for future sessions. The goal is to preserve intent, not just features.
 
+Per `CLAUDE.md`, this doc is organized into **Current Canon** (present-state truth, edited in place) and **Resolved Dragons and Pivots** (append-only devlog, dated entries). The long-form "Where We Have Been" / phase history below these two sections predates the convention and is retained verbatim as background context.
+
+## Current Canon
+
+### EchoSurface → Resonant Lab adapter (v0)
+
+`echo_adapter_v0.md` at the repo root is the canonical spec for the adapter bridge. The bridge is an **offline compiler**, not a live integration, not a melody engine, not a runtime sync. It treats EchoSurface scenes as authoring input for small dynamical oscillator worlds that are then diagnosed by Resonant Lab's existing summary/atlas pipeline.
+
+**Submodule.** `lab/resonant-instrument-lab/` is a git submodule. After cloning, run `git submodule update --init --recursive`. The submodule owns its own venv at `lab/resonant-instrument-lab/.venv/` (created by `lab/resonant-instrument-lab/run.sh` or manually via `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`).
+
+**Directory layout for the adapter:**
+- `scripts/compile_echo_scene.py` — the compiler. Reads `echo_scene.json`, writes a validated garden YAML + provenance JSON sidecar. Imports `sim.config.validate` directly from the submodule so schema drift cannot silently pass.
+- `examples/echo/` — canonical input scenes. `two_squares_one_contour.json` is the first proof object.
+- `configs/generated/` — compiled outputs (YAML config + `.provenance.json` sidecar). Committed, since they are the canonical proof artifacts.
+- `runs/` — simulator outputs (`state.npz`, `audio.wav`, `summary.json`, `atlas.json`, `atlas_audio/`). Gitignored; reproducible from the committed config.
+
+**End-to-end pipeline (deterministic):**
+
+```
+scripts/compile_echo_scene.py  →  configs/generated/<name>.yaml + .provenance.json
+lab/.../scripts/run_sim.py     →  runs/generated/<name>/summary.json  (plus state.npz, audio.wav, topology.json)
+lab/.../scripts/build_atlas.py →  runs/generated/<name>/atlas.json
+```
+
+**Canonical v0 mapping (do not broaden without updating `echo_adapter_v0.md`):**
+- `shape.kind` → cluster cardinality (triangle=3, square=4, pentagon=5, hexagon=6) **and** base frequency family (3.0 / 2.0 / 2.5 / 3.0 Hz)
+- `shape.center` + `shape.radius` + `shape.rotation_deg` → `k` node positions on a circle around the center, clamped to `[0,1]`
+- `shape.kind` (template) → symmetric Δω offsets applied to the base (e.g. square = `[-0.15, -0.05, +0.05, +0.15]` Hz)
+- `shape.weight` → mild global scale: `K0 = 0.8 + 0.4 · mean(weight)`
+- `contour` → one `nudge` event per node of the anchor shape, at `t = 4.0 + i · 1.0` s, with `delta_hz = 0.10 + 0.20 · strength`. Target policy is **all nodes from anchor shape** (documented in provenance).
+- `tide` → accepted in input schema, deferred in v0.
+- Fixed defaults: `sigma=0.18`, `eta=0.0`, `gamma=0.10`, `duration=12.0 s`, `control_rate=200 Hz`, `audio_rate=22050 Hz`, `seed=42`. `gamma=0.10` (not the spec's `e.g., 1.0`) because it matches every validated reference fixture.
+
+**Provenance is load-bearing.** The sidecar (`configs/generated/<name>.provenance.json`, schema_version 1) records `shape_to_nodes`, per-shape metadata, per-contour compiled events, the full mapping rules (kind table, formulas, defaults), and deferred-tide counts. Without it, the bridge is opaque. Every future UI reading the generated atlas should be able to answer "which cluster came from which shape?" from this file alone.
+
+**Explicitly out of scope (v0):** live EchoSurface integration, browser↔Python runtime bridge, shape-to-note melody generation, harmonic analysis, MIDI/DAW layers, semantic zoom / scopes, reverse-mapping lab findings back into EchoSurface, generalized graphics parser, full EchoSurface document model.
+
+## Resolved Dragons and Pivots
+
+### 2026-04-22 — Claude Opus 4.7 (1M context)
+
+**Built the EchoSurface → Resonant Lab adapter v0** per `echo_adapter_v0.md`. This is the first concrete bridge between the two projects since the submodule was added on 2026-04-22 (commit `35ba4f7`) and the spec on `1543733`.
+
+Deliverables: `scripts/compile_echo_scene.py`, `examples/echo/two_squares_one_contour.json`, and the compiled proof artifacts under `configs/generated/echo_two_squares.{yaml,provenance.json}`. `.gitignore` gained `runs/` so simulator artifacts (large `.npz`/`.wav` plus per-fixture atlases) stay out of version control — they're reproducible from the config.
+
+Verified end-to-end: the compiled 8-node / 4-event world fires 7 of 8 detectors in `summary.json`, and `build_atlas.py` ranks 16 interventions with a clear spread (top: "ablate node 7", score 3.57, 3 detector flips; bottom: 0.25). That's the nontrivial atlas story the spec asked for.
+
+Decisions made that are worth recording:
+- Chose **`all_nodes_from_anchor_shape`** as the contour-target policy over the nearest-centroid-node alternative. Rationale per spec: higher visible effect on the regime. Documented in `provenance.mapping.target_policy`.
+- Chose **`gamma = 0.10`** over the spec's "e.g. `1.0`". Rationale: 0.10 is what every validated reference fixture in `lab/.../configs/regime_*.yaml` uses, so it reliably produces a nontrivial regime. The spec's `1.0` is flagged as an example, not a contract. Documented in `provenance.notes`.
+- Chose to **commit `configs/generated/`** (YAML + provenance) but **gitignore `runs/`**. The generated config is itself a proof artifact of the compiler contract; the simulator outputs are derivable. This is how the lab treats its own `demo/` runs too.
+- Chose a **single-file, no-framework compiler**. The spec explicitly says "Prefer a small, readable script over a reusable framework." No abstraction layer, no plugin system, no CLI around the lab scripts — the compiler just prints the two follow-up commands.
+
+The adapter stays narrow by design. Any next pass that wants to widen it — live integration, tide compilation, melody generation, reverse mapping — should update `echo_adapter_v0.md` first so the spec and the implementation stay coupled.
+
 ## Core Thesis
 
 EchoSurface began as an expressive touch surface, but the more interesting identity emerged once we treated it as a composition toy and ritual instrument.
