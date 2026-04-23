@@ -85,6 +85,7 @@ One canonical example is committed as the first end-to-end proof that the bridge
 | Generated garden config | [`configs/generated/echo_two_squares.yaml`](./configs/generated/echo_two_squares.yaml) |
 | Provenance sidecar | [`configs/generated/echo_two_squares.provenance.json`](./configs/generated/echo_two_squares.provenance.json) |
 | Simulator + atlas outputs | `runs/generated/echo_two_squares/{summary,atlas,topology}.json`, `state.npz`, `audio.wav`, `atlas_audio/` (gitignored; reproducible) |
+| Live visual surface | [`public/generated/index.html`](./public/generated/index.html) — committed landing page that opens each example in a vendored copy of the lab viewer. Deployed by the existing Pages workflow; reachable at `/generated/` on the live site. |
 
 Run it end-to-end:
 
@@ -99,6 +100,12 @@ scripts/run_echo_pipeline.sh --scene path/to/scene.json --name custom_out
 ```
 
 Outputs land at `configs/generated/<name>.{yaml,provenance.json}` and `runs/generated/<name>/{summary,atlas}.json`.
+
+To refresh the committed visual-surface bundle under `public/generated/` (vendored viewer + per-example run mirror — this is what GH Pages serves at `/generated/`):
+
+```bash
+python3 scripts/build_echo_pages.py
+```
 
 If you prefer to drive each stage yourself, the compiler is plain Python:
 

@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>EchoSurface — generated adapter examples</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Visual entry points for EchoSurface → Resonant Lab adapter examples: each generated scene shown as an Intervention Atlas, a baseline single-run view, and its provenance sidecar.">
+  <style>
+    :root {
+      --bg: #0f1114;
+      --panel: #161a1f;
+      --border: #232a33;
+      --text: #d7dde5;
+      --muted: #8a94a1;
+      --accent: #7ecb8e;
+      --accent-dim: #3a6142;
+      --link: #8fb8ff;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, "Roboto Mono", monospace;
+    }
+    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); }
+    body { font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif; }
+    main { max-width: 860px; margin: 0 auto; padding: 48px 24px 64px; }
+    .mono { font-family: var(--mono); font-size: 12.5px; }
+    .kicker { color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; margin: 0 0 8px; }
+    h1 { font-size: 28px; font-weight: 600; margin: 0 0 16px; letter-spacing: -0.01em; }
+    p.lede { color: #c1c8d1; font-size: 15.5px; max-width: 70ch; }
+    a { color: var(--link); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code { font-family: var(--mono); font-size: 12.5px; background: #1c2128; padding: 1px 5px; border-radius: 3px; }
+
+    section.example {
+      margin-top: 32px;
+      padding: 20px 22px 22px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+    section.example h2 { margin: 0 0 4px; font-size: 18px; font-weight: 600; }
+    section.example .source { color: var(--muted); margin: 0 0 10px; }
+    section.example .story { margin: 0 0 18px; color: #e2e7ee; }
+    section.example .story em { color: var(--accent); font-style: normal; }
+
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
+    .btn {
+      display: inline-block;
+      padding: 8px 14px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #1a1f26;
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 12.5px;
+      line-height: 1.3;
+    }
+    .btn:hover { text-decoration: none; background: #1f252d; border-color: #2f3844; }
+    .btn-primary {
+      border-color: var(--accent-dim);
+      background: #1a2a1f;
+      color: var(--accent);
+    }
+    .btn-primary:hover { background: #1e3325; border-color: var(--accent); }
+
+    .meta { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+    .meta a { color: #9faab8; }
+    .meta li { margin: 2px 0; }
+    .meta ul { padding-left: 18px; margin: 8px 0 0; }
+
+    footer { margin-top: 40px; padding-top: 18px; border-top: 1px solid var(--border); color: var(--muted); font-size: 13px; }
+    footer a { color: #9faab8; }
+  </style>
+</head>
+<body>
+<main>
+
+  <p class="kicker mono">echosurface · generated adapter examples</p>
+  <h1>EchoSurface → Resonant Lab, one scene at a time.</h1>
+  <p class="lede">
+    Each card below is a committed proof artifact from the EchoSurface →
+    resonant-instrument-lab adapter. The scene JSON is the input; the
+    generated garden config, provenance, and full simulator + atlas
+    bundle are mirrored here so every link opens directly in the vendored
+    lab viewer — no backend, no submodule init, no sim rerun. Bridge
+    spec: <a href="https://github.com/henry-filgueiras/echo-surface/blob/main/echo_adapter_v0.md"><code>echo_adapter_v0.md</code></a>.
+  </p>
+
+  <section class="example">
+    <h2>two_squares_one_contour</h2>
+    <p class="source mono">
+      scene: <a href="https://github.com/henry-filgueiras/echo-surface/blob/main/examples/echo/two_squares_one_contour.json">examples/echo/two_squares_one_contour.json</a>
+      · compiled to <code>runs/echo_two_squares/</code>
+    </p>
+    <p class="story">
+      The two squares phase-lock, but the lock is <em>brittle</em> —
+      perturbing a node in the contour-anchored left square cleanly
+      breaks it. Eight nodes, four scheduled nudges, 12-second sim; the
+      atlas ranks all 16 single-node interventions and the top result
+      flips <code>phase_locked</code> FIRED → silent.
+    </p>
+
+    <div class="actions">
+      <a class="btn btn-primary" href="viewer/index.html?atlas=../runs/echo_two_squares/atlas.json&amp;select=ablate_n1">
+        open intervention atlas →
+      </a>
+      <a class="btn" href="viewer/index.html?summaryA=../runs/echo_two_squares/summary.json">
+        baseline single-run →
+      </a>
+      <a class="btn" href="viewer/index.html?atlas=../runs/echo_two_squares/atlas.json&amp;select=ablate_n1">
+        top intervention (ablate n1) →
+      </a>
+    </div>
+
+    <div class="meta">
+      artifacts:
+      <ul>
+        <li><a href="runs/echo_two_squares/config.yaml">config.yaml</a> — generated garden config (8 oscillators, K₀=2.0, σ=0.22)</li>
+        <li><a href="runs/echo_two_squares/provenance.json">provenance.json</a> — shape → node mapping, per-contour compiled events, deferred-tide counts</li>
+        <li><a href="runs/echo_two_squares/summary.json">summary.json</a> · <a href="runs/echo_two_squares/atlas.json">atlas.json</a> · <a href="runs/echo_two_squares/topology.json">topology.json</a></li>
+        <li><a href="runs/echo_two_squares/audio.wav">baseline audio.wav</a> · <code>atlas_audio/ablate_n*.wav</code>, <code>nudge_n*_+0.25hz.wav</code> (one per intervention)</li>
+      </ul>
+    </div>
+  </section>
+
+  <footer>
+    EchoSurface main app: <a href="../">../</a>.
+    Source on GitHub:
+    <a href="https://github.com/henry-filgueiras/echo-surface">henry-filgueiras/echo-surface</a>.
+    Viewer vendored from
+    <a href="https://github.com/henry-filgueiras/resonant-instrument-lab">resonant-instrument-lab</a>;
+    this page and the mirrored <code>runs/</code> / <code>viewer/</code> bundles
+    under <code>public/generated/</code> are produced by
+    <code>scripts/build_echo_pages.py</code>.
+  </footer>
+
+</main>
+</body>
+</html>

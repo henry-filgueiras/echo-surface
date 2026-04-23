@@ -127,3 +127,6 @@ echo "  config:     $CONFIG"
 echo "  provenance: $PROVENANCE"
 echo "  summary:    $RUN_DIR/summary.json"
 echo "  atlas:      $RUN_DIR/atlas.json"
+echo
+echo "to refresh the committed generated-examples Pages bundle:"
+echo "  python3 scripts/build_echo_pages.py"
